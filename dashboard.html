@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Mitrade AI 訊號</title>
+<style>
+:root {
+  --bg:#070b10; --s1:#0f1620; --s2:#141d28;
+  --border:rgba(0,200,255,0.1);
+  --accent:#00c8ff; --green:#00e87a; --red:#ff3d5a;
+  --yellow:#ffc93c; --text:#c5d8ea; --muted:#486070;
+  --mono:'SF Mono',monospace; --sans:-apple-system,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;padding-bottom:80px}
+
+/* ── Top bar ── */
+.topbar{
+  position:sticky;top:0;z-index:100;
+  background:rgba(7,11,16,0.95);backdrop-filter:blur(12px);
+  border-bottom:0.5px solid var(--border);
+  padding:12px 16px;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.brand{font-size:13px;font-weight:600;color:var(--accent);letter-spacing:0.5px}
+.topbar-right{display:flex;align-items:center;gap:10px}
+.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 5px var(--green)}50%{opacity:.4;box-shadow:none}}
+.last-update{font-size:10px;color:var(--muted)}
+
+/* ── Tabs ── */
+.tabs{display:flex;border-bottom:0.5px solid var(--border);background:var(--s1)}
+.tab{flex:1;padding:12px 0;text-align:center;font-size:12px;color:var(--muted);cursor:pointer;transition:.2s}
+.tab.active{color:var(--accent);border-bottom:2px solid var(--accent)}
+
+/* ── Content ── */
+.page{display:none;padding:16px}
+.page.active{display:block}
+
+/* ── Env strip ── */
+.env-strip{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px;
+}
+.env-pill{
+  background:var(--s1);border:0.5px solid var(--border);
+  border-radius:10px;padding:10px 12px;text-align:center;
+}
+.env-pill .label{font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:4px}
+.env-pill .val{font-size:16px;font-weight:700;font-family:var(--mono)}
+.env-pill .sub{font-size:10px;color:var(--muted);margin-top:2px}
+.c-green .val{color:var(--green)} .c-red .val{color:var(--red)} .c-yellow .val{color:var(--yellow)}
+
+/* ── System status banner ── */
+.status-banner{
+  border-radius:10px;padding:12px 16px;margin-bottom:16px;
+  display:flex;align-items:center;gap:10px;
+}
+.status-banner.good{background:rgba(0,232,122,.08);border:0.5px solid rgba(0,232,122,.25)}
+.status-banner.warn{background:rgba(255,201,60,.08);border:0.5px solid rgba(255,201,60,.25)}
+.status-banner.bad {background:rgba(255,61,90,.08);border:0.5px solid rgba(255,61,90,.25)}
+.banner-icon{font-size:22px;flex-shrink:0}
+.banner-text{font-size:13px;line-height:1.5}
+
+/* ── Signal card ── */
+.signal-card{
+  background:var(--s1);border:0.5px solid var(--border);
+  border-radius:14px;margin-bottom:14px;overflow:hidden;
+}
+.signal-card.buy {border-left:3px solid var(--green)}
+.signal-card.sell{border-left:3px solid var(--red)}
+
+.sc-header{
+  display:flex;align-items:center;gap:10px;
+  padding:12px 14px;border-bottom:0.5px solid var(--border);
+}
+.sc-badge{
+  padding:4px 10px;border-radius:5px;
+  font-size:11px;font-weight:700;font-family:var(--mono);
+}
+.sc-badge.buy {background:rgba(0,232,122,.12);color:var(--green)}
+.sc-badge.sell{background:rgba(255,61,90,.12); color:var(--red)}
+.sc-name{font-size:14px;font-weight:700;flex:1}
+.sc-score{
+  font-family:var(--mono);font-size:12px;
+  padding:3px 8px;border-radius:5px;
+  background:var(--s2);
+}
+.sc-action{
+  font-size:10px;padding:3px 8px;border-radius:5px;font-family:var(--mono);
+}
+.sc-action.green{background:rgba(0,232,122,.1);color:var(--green)}
+.sc-action.yellow{background:rgba(255,201,60,.1);color:var(--yellow)}
+
+.sc-body{padding:14px}
+
+/* 價格格線 */
+.price-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.price-box{background:var(--s2);border-radius:8px;padding:10px 12px}
+.price-box .pl{font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:3px}
+.price-box .pv{font-family:var(--mono);font-size:13px;font-weight:600}
+.price-box.entry .pv{color:var(--accent)}
+.price-box.sl .pv{color:var(--red)}
+.price-box.tp .pv{color:var(--green)}
+
+/* 操作步驟 */
+.steps{margin-bottom:12px}
+.steps-title{font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:8px}
+.step{display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;font-size:12px}
+.step-n{
+  width:18px;height:18px;border-radius:50%;
+  background:rgba(0,200,255,.1);color:var(--accent);
+  font-size:9px;font-family:var(--mono);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.step-t{color:var(--text);line-height:1.5}
+.step-t b{color:var(--accent);font-family:var(--mono)}
+
+/* 條件標籤 */
+.conds{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+.cond{font-size:10px;padding:2px 7px;border-radius:3px;font-family:var(--mono)}
+.cond.ok {background:rgba(0,232,122,.08);color:var(--green);border:0.5px solid rgba(0,232,122,.2)}
+.cond.no {background:rgba(255,255,255,.03);color:var(--muted)}
+
+/* AI 建議 */
+.ai-block{
+  background:rgba(0,200,255,.04);border:0.5px solid rgba(0,200,255,.15);
+  border-radius:8px;padding:10px 12px;margin-bottom:10px;
+}
+.ai-label{font-size:9px;color:var(--accent);letter-spacing:1px;margin-bottom:4px}
+.ai-text{font-size:12px;line-height:1.6}
+
+/* 宏觀備注 */
+.macro-note{font-size:11px;color:var(--muted);padding:2px 0}
+
+/* 底部元數據 */
+.sc-meta{
+  display:flex;flex-wrap:wrap;gap:10px;
+  padding-top:10px;border-top:0.5px solid var(--border);
+  font-size:10px;color:var(--muted);font-family:var(--mono);
+}
+.sc-meta span{color:var(--text)}
+
+/* 免責 */
+.disclaimer{
+  font-size:10px;color:var(--muted);line-height:1.6;
+  margin-top:8px;padding:8px;
+  background:rgba(255,255,255,.02);border-radius:6px;
+}
+
+/* ── 無訊號 ── */
+.no-signal{
+  text-align:center;padding:60px 20px;
+  color:var(--muted);font-size:13px;
+}
+.no-signal .icon{font-size:40px;margin-bottom:12px;opacity:.3}
+.no-signal small{display:block;margin-top:8px;font-size:11px}
+
+/* ── 宏觀頁 ── */
+.macro-row{
+  background:var(--s1);border:0.5px solid var(--border);
+  border-radius:10px;padding:14px 16px;margin-bottom:10px;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.macro-name{font-size:13px;color:var(--text)}
+.macro-val{font-family:var(--mono);font-size:14px;font-weight:600;text-align:right}
+.macro-chg{font-size:11px;text-align:right}
+.up{color:var(--green)} .dn{color:var(--red)} .nt{color:var(--muted)}
+
+/* ── 歷史頁 ── */
+.hist-row{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 14px;
+  background:var(--s1);border:0.5px solid var(--border);
+  border-radius:8px;margin-bottom:8px;
+  font-size:12px;
+}
+.hist-dir{width:36px;text-align:center;font-family:var(--mono);font-size:10px;
+  padding:2px 5px;border-radius:3px;}
+.hist-dir.buy {background:rgba(0,232,122,.1);color:var(--green)}
+.hist-dir.sell{background:rgba(255,61,90,.1);color:var(--red)}
+.hist-info{flex:1}
+.hist-result{font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:3px}
+.hr-pending{background:rgba(255,201,60,.1);color:var(--yellow)}
+.hr-tp1   {background:rgba(0,232,122,.1); color:var(--green)}
+.hr-sl    {background:rgba(255,61,90,.1); color:var(--red)}
+
+/* ── 底部導航 ── */
+.bottom-nav{
+  position:fixed;bottom:0;left:0;right:0;
+  background:rgba(7,11,16,.97);backdrop-filter:blur(12px);
+  border-top:0.5px solid var(--border);
+  display:flex;
+}
+.nav-item{
+  flex:1;padding:12px 0;text-align:center;cursor:pointer;
+  font-size:10px;color:var(--muted);transition:.2s;
+}
+.nav-item.active{color:var(--accent)}
+.nav-icon{font-size:20px;margin-bottom:2px}
+
+/* ── 載入 ── */
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--muted);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<!-- 頂部 -->
+<div class="topbar">
+  <div class="brand">📡 Mitrade AI Signal</div>
+  <div class="topbar-right">
+    <div class="live-dot"></div>
+    <div class="last-update" id="last-update">載入中...</div>
+  </div>
+</div>
+
+<!-- 頁面內容 -->
+
+<!-- ── 訊號頁 ── -->
+<div class="page active" id="page-signals">
+  <div style="padding:16px 16px 0">
+
+    <!-- 環境指標 -->
+    <div class="env-strip">
+      <div class="env-pill" id="pill-vix">
+        <div class="label">VIX</div>
+        <div class="val">—</div>
+        <div class="sub">恐慌指數</div>
+      </div>
+      <div class="env-pill" id="pill-env">
+        <div class="label">環境</div>
+        <div class="val">—</div>
+        <div class="sub">—</div>
+      </div>
+      <div class="env-pill" id="pill-fg">
+        <div class="label">情緒</div>
+        <div class="val">—</div>
+        <div class="sub">恐懼貪婪</div>
+      </div>
+    </div>
+
+    <!-- 系統狀態 -->
+    <div class="status-banner good" id="status-banner">
+      <div class="banner-icon">🟢</div>
+      <div class="banner-text" id="status-text">系統啟動中...</div>
+    </div>
+
+  </div>
+
+  <!-- 訊號列表 -->
+  <div style="padding:0 16px" id="signals-list">
+    <div class="no-signal">
+      <div class="icon">📡</div>
+      <span class="spin"></span>首次掃描中，約需 1-2 分鐘...
+      <small>系統每 15 分鐘自動掃描全市場</small>
+    </div>
+  </div>
+</div>
+
+<!-- ── 宏觀頁 ── -->
+<div class="page" id="page-macro">
+  <div id="macro-list" style="padding:16px">
+    <div class="no-signal"><div class="icon">🌍</div>載入中...</div>
+  </div>
+</div>
+
+<!-- ── 歷史頁 ── -->
+<div class="page" id="page-history">
+  <div id="history-list" style="padding:16px">
+    <div class="no-signal"><div class="icon">📋</div>尚無歷史記錄</div>
+  </div>
+</div>
+
+<!-- ── 設定頁 ── -->
+<div class="page" id="page-settings">
+  <div style="padding:16px">
+    <div class="status-banner good" style="margin-bottom:16px">
+      <div class="banner-icon">✅</div>
+      <div class="banner-text">系統運行中 · 24小時監控</div>
+    </div>
+    <div id="settings-info"></div>
+  </div>
+</div>
+
+<!-- 底部導航 -->
+<div class="bottom-nav">
+  <div class="nav-item active" onclick="switchTab('signals', this)">
+    <div class="nav-icon">📡</div>訊號
+  </div>
+  <div class="nav-item" onclick="switchTab('macro', this)">
+    <div class="nav-icon">🌍</div>宏觀
+  </div>
+  <div class="nav-item" onclick="switchTab('history', this)">
+    <div class="nav-icon">📋</div>歷史
+  </div>
+  <div class="nav-item" onclick="switchTab('settings', this)">
+    <div class="nav-icon">⚙️</div>狀態
+  </div>
+</div>
+
+<script>
+// ── Tab 切換 ──────────────────────────
+function switchTab(name, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  el.classList.add('active');
+}
+
+// ── 數值格式化 ─────────────────────────
+const fmt = (v, d=2) => v==null ? '—' : parseFloat(v).toFixed(d);
+const fmtChg = v => {
+  if (v==null) return '<span class="nt">—</span>';
+  const n = parseFloat(v);
+  const cls = n>0 ? 'up' : n<0 ? 'dn' : 'nt';
+  return `<span class="${cls}">${n>0?'+':''}${n.toFixed(2)}%</span>`;
+};
+
+// ── 更新環境指標 ───────────────────────
+function updateEnv(data) {
+  const macro  = data.macro_data  || {};
+  const status = data.system_status || {};
+  const session= data.market_session|| {};
+
+  // VIX
+  const vix = macro.vix;
+  if (vix) {
+    const v = parseFloat(vix.price);
+    const pill = document.getElementById('pill-vix');
+    pill.querySelector('.val').textContent = fmt(v,1);
+    pill.querySelector('.sub').textContent = fmtChg(vix.chg).replace(/<[^>]+>/g,'') + '%';
+    pill.className = 'env-pill ' + (v>=40?'c-red':v>=25?'c-yellow':'c-green');
+  }
+
+  // 環境分
+  const score = status.env_score;
+  if (score!=null) {
+    const pill = document.getElementById('pill-env');
+    pill.querySelector('.val').textContent = score;
+    pill.querySelector('.sub').textContent = status.env_status||'—';
+    pill.className = 'env-pill ' + (score>=70?'c-green':score>=40?'c-yellow':'c-red');
+  }
+
+  // F&G
+  const fg = macro.fear_greed;
+  if (fg) {
+    const pill = document.getElementById('pill-fg');
+    pill.querySelector('.val').textContent = fmt(fg.score,0);
+    pill.querySelector('.sub').textContent = fg.label_zh||'—';
+    const s = parseFloat(fg.score);
+    pill.className = 'env-pill ' + (s<30||s>70?'c-yellow':'c-green');
+  }
+
+  // 狀態橫幅
+  const banner = document.getElementById('status-banner');
+  const btxt   = document.getElementById('status-text');
+  const env    = status.env_status||'正常';
+  const sess   = session.session_zh||'';
+  const sigCnt = (data.active_signals||[]).length;
+
+  if ((status.env_score||100) < 30) {
+    banner.className = 'status-banner bad';
+    btxt.innerHTML   = `🚨 <b>今日觀望</b> — 環境危險，不建議交易`;
+  } else if ((status.env_score||100) < 60) {
+    banner.className = 'status-banner warn';
+    btxt.innerHTML   = `⚠️ <b>謹慎交易</b> — ${env} · ${sess} · ${sigCnt} 個訊號`;
+  } else {
+    banner.className = 'status-banner good';
+    btxt.innerHTML   = `✅ <b>適合交易</b> — ${sess} · ${sigCnt} 個有效訊號`;
+  }
+}
+
+// ── 建立訊號卡 ─────────────────────────
+function buildCard(s) {
+  const dir      = s.direction||'buy';
+  const dirZH    = dir==='buy'?'做多 BUY':'做空 SELL';
+  const score    = s.score||0;
+  const scColor  = score>=80?'var(--green)':score>=65?'var(--yellow)':'var(--muted)';
+  const condsMet = (s.conditions_met||[]).map(c=>`<span class="cond ok">✓ ${c}</span>`).join('');
+  const condsFail= (s.conditions_fail||[]).slice(0,2).map(c=>`<span class="cond no">✗ ${c}</span>`).join('');
+  const macroTxt = (s.macro_notes||[]).map(n=>`<div class="macro-note">${n}</div>`).join('');
+  const aiRec    = s.ai_recommendation||'';
+  const genTime  = s.generated_at ? new Date(s.generated_at).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '—';
+  const expTime  = s.expires_at   ? new Date(s.expires_at  ).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}) : '—';
+
+  return `
+<div class="signal-card ${dir}">
+  <div class="sc-header">
+    <div class="sc-badge ${dir}">${dirZH}</div>
+    <div class="sc-name">${s.emoji||'📊'} ${s.name||s.symbol}</div>
+    <div class="sc-score" style="color:${scColor}">${score}</div>
+  </div>
+  <div class="sc-body">
+    <div class="sc-action ${s.action_color||'yellow'}" style="margin-bottom:10px;display:inline-block">${s.action||'等待確認'}</div>
+
+    <div class="price-grid">
+      <div class="price-box entry"><div class="pl">進場點</div><div class="pv">${fmt(s.entry_price,4)}</div></div>
+      <div class="price-box sl">   <div class="pl">止損 SL</div><div class="pv">${fmt(s.stop_loss,4)}</div></div>
+      <div class="price-box tp">   <div class="pl">止盈 TP1</div><div class="pv">${fmt(s.tp1,4)}</div></div>
+      <div class="price-box tp">   <div class="pl">止盈 TP2</div><div class="pv">${fmt(s.tp2,4)}</div></div>
+    </div>
+
+    <div class="steps">
+      <div class="steps-title">MITRADE 操作</div>
+      <div class="step"><div class="step-n">1</div><div class="step-t">搜尋 <b>${s.symbol}</b></div></div>
+      <div class="step"><div class="step-n">2</div><div class="step-t">點 <b>${dir==='buy'?'Buy（做多）':'Sell（做空）'}</b></div></div>
+      <div class="step"><div class="step-n">3</div><div class="step-t">待定單 → 進場 <b>${fmt(s.entry_price,4)}</b></div></div>
+      <div class="step"><div class="step-n">4</div><div class="step-t">SL <b>${fmt(s.stop_loss,4)}</b> · TP1 <b>${fmt(s.tp1,4)}</b> · TP2 <b>${fmt(s.tp2,4)}</b></div></div>
+      <div class="step"><div class="step-n">5</div><div class="step-t">手數 <b>${s.suggested_lot} 手</b> · 風險 <b style="color:var(--red)">${s.risk_pct}%</b></div></div>
+    </div>
+
+    <div class="conds">${condsMet}${condsFail}</div>
+    ${macroTxt?`<div style="margin-bottom:10px">${macroTxt}</div>`:''}
+    ${aiRec?`<div class="ai-block"><div class="ai-label">AI 建議</div><div class="ai-text"><b>${aiRec}</b>${s.ai_reason?' — '+s.ai_reason:''}</div></div>`:''}
+
+    <div class="sc-meta">
+      <div>時框 <span>${s.timeframe||'—'}</span></div>
+      <div>風報 <span>1:${s.rr1} / 1:${s.rr2}</span></div>
+      <div>產生 <span>${genTime}</span></div>
+      <div>到期 <span>${expTime}</span></div>
+    </div>
+    <div class="disclaimer">⚠️ AI 技術分析訊號，僅供參考，不構成投資建議。盈虧自負。</div>
+  </div>
+</div>`;
+}
+
+// ── 更新宏觀頁 ─────────────────────────
+function updateMacro(data) {
+  const macro = data.macro_data||{};
+  const rows  = [
+    {key:'vix',   name:'VIX 恐慌',     decimals:1},
+    {key:'dxy',   name:'美元指數 DXY',  decimals:2},
+    {key:'us10y', name:'美債10年',      decimals:3},
+    {key:'sp500', name:'S&P 500',       decimals:0},
+    {key:'gold',  name:'黃金 XAU',      decimals:0},
+    {key:'btc',   name:'Bitcoin',       decimals:0},
+  ];
+
+  const fg = macro.fear_greed;
+  let html = '';
+
+  rows.forEach(r => {
+    const d = macro[r.key];
+    if (!d) return;
+    const chgClass = parseFloat(d.chg)>0?'up':parseFloat(d.chg)<0?'dn':'nt';
+    html += `<div class="macro-row">
+      <div class="macro-name">${r.name}</div>
+      <div>
+        <div class="macro-val">${fmt(d.price, r.decimals)}</div>
+        <div class="macro-chg ${chgClass}">${parseFloat(d.chg)>0?'+':''}${parseFloat(d.chg).toFixed(2)}%</div>
+      </div>
+    </div>`;
+  });
+
+  if (fg) {
+    html += `<div class="macro-row">
+      <div class="macro-name">恐懼貪婪指數</div>
+      <div><div class="macro-val">${fmt(fg.score,0)}/100</div><div class="macro-chg">${fg.label_zh||''}</div></div>
+    </div>`;
+  }
+
+  document.getElementById('macro-list').innerHTML = html || '<div class="no-signal"><div class="icon">🌍</div>數據載入中...</div>';
+}
+
+// ── 更新歷史頁 ─────────────────────────
+function updateHistory(data) {
+  const log = (data.signal_log||[]).slice().reverse().slice(0,30);
+  if (!log.length) {
+    document.getElementById('history-list').innerHTML = '<div class="no-signal"><div class="icon">📋</div>系統上線後開始記錄<small>每個訊號都會被追蹤</small></div>';
+    return;
+  }
+  let html = `<div style="font-size:11px;color:var(--muted);margin-bottom:12px">共 ${data.signal_log.length} 筆記錄 · 追蹤訊號結果以計算勝率</div>`;
+  log.forEach(h => {
+    const dir = h.direction||'buy';
+    const gen = h.generated ? new Date(h.generated).toLocaleDateString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+    const resultClass = h.result==='tp1'||h.result==='tp2'?'hr-tp1':h.result==='sl'?'hr-sl':'hr-pending';
+    const resultText  = h.result==='tp1'?'止盈1':h.result==='tp2'?'止盈2':h.result==='sl'?'止損':'待定';
+    html += `<div class="hist-row">
+      <div class="hist-dir ${dir}">${dir.toUpperCase()}</div>
+      <div class="hist-info">
+        <div style="font-weight:600">${h.symbol}</div>
+        <div style="font-size:10px;color:var(--muted)">${gen}</div>
+      </div>
+      <div class="hist-result ${resultClass}">${resultText}</div>
+    </div>`;
+  });
+  document.getElementById('history-list').innerHTML = html;
+}
+
+// ── 更新設定頁 ─────────────────────────
+function updateSettings(data) {
+  const el = document.getElementById('settings-info');
+  el.innerHTML = `
+    <div class="macro-row"><div class="macro-name">系統版本</div><div class="macro-val">${data.version||'2.0'}</div></div>
+    <div class="macro-row"><div class="macro-name">掃描次數</div><div class="macro-val">${data.scan_count||0}</div></div>
+    <div class="macro-row"><div class="macro-name">發出訊號</div><div class="macro-val">${data.signal_count||0}</div></div>
+    <div class="macro-row"><div class="macro-name">上次掃描</div><div class="macro-val" style="font-size:11px">${data.last_scan_time||'—'}</div></div>
+    <div style="margin-top:20px;font-size:11px;color:var(--muted);line-height:1.8">
+      📱 Telegram Bot：@mitrade_signal_bot<br>
+      🔄 掃描頻率：每 15 分鐘<br>
+      ⏱️ 訊號有效期：4 小時<br>
+      🌐 雲端部署：Render<br>
+      <br>
+      <b>Telegram 指令：</b><br>
+      /status — 系統狀態<br>
+      /signals — 當前訊號<br>
+      /macro — 宏觀數據<br>
+      /help — 說明
+    </div>
+    <div class="disclaimer" style="margin-top:16px">${data.disclaimer||''}</div>
+  `;
+}
+
+// ── 主更新函數 ─────────────────────────
+async function refresh() {
+  try {
+    const res  = await fetch('/api/state');
+    const data = await res.json();
+
+    document.getElementById('last-update').textContent =
+      new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
+
+    updateEnv(data);
+    updateMacro(data);
+    updateHistory(data);
+    updateSettings(data);
+
+    // 訊號列表
+    const signals = data.active_signals||[];
+    const sigList = document.getElementById('signals-list');
+
+    if (!signals.length) {
+      sigList.innerHTML = `<div class="no-signal">
+        <div class="icon">📡</div>
+        目前沒有符合條件的訊號
+        <small>分數需 ≥65 才顯示 · 下次掃描 ${data.last_scan_time ? '15分鐘後' : '即將開始'}</small>
+      </div>`;
+    } else {
+      sigList.innerHTML = signals.map(buildCard).join('');
+    }
+  } catch(e) {
+    console.error('Refresh error:', e);
+  }
+}
+
+// 啟動
+refresh();
+setInterval(refresh, 30000); // 每 30 秒更新
+</script>
+</body>
+</html>
