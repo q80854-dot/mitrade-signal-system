@@ -1,9 +1,0 @@
-# 絕對不能上傳到 GitHub 的檔案
-.env
-*.pyc
-__pycache__/
-.DS_Store
-*.log
-venv/
-.venv/
-instance/
