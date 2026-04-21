@@ -793,37 +793,50 @@ function updateSetPage(state){
 // ── 主更新 ───────────────────────────────
 let _quotes={},_scan={},_corr={},_today={},_macroFull={};
 
-async function refreshAll(){
+async function safeGet(url, fallback={}){
   try{
-    document.getElementById('last-upd').textContent='更新中...';
-    const [stR,mR,qR,scR,crR,tdR]=await Promise.all([
-      fetch('/api/state'),
-      fetch('/api/macro'),
-      fetch('/api/quotes'),
-      fetch('/api/scan_summary'),
-      fetch('/api/correlation'),
-      fetch('/api/today'),
+    const r=await fetch(url,{signal:AbortSignal.timeout(15000)});
+    if(!r.ok) return fallback;
+    return await r.json();
+  }catch(e){
+    console.warn('API failed:',url,e.message);
+    return fallback;
+  }
+}
+
+async function refreshAll(){
+  document.getElementById('last-upd').textContent='更新中...';
+  try{
+    // 主要數據（必須有）
+    const stData = await safeGet('/api/state', {active_signals:[],macro_data:{},system_status:{},market_session:{}});
+    // 次要數據（有最好，沒有也繼續）
+    const [mData,qData,scData] = await Promise.all([
+      safeGet('/api/macro', {}),
+      safeGet('/api/quotes', {quotes:{}}),
+      safeGet('/api/scan_summary', {signals:[]}),
     ]);
-    const state=await stR.json();
-    _macroFull=await mR.json();
-    _quotes=(await qR.json()).quotes||{};
-    _scan=await scR.json();
-    _corr=await crR.json();
-    _today=await tdR.json();
-    // 合併
-    state.fred_data=_macroFull.fred||{};
-    state.us_futures_data=_macroFull.futures||{};
-    state.sector_etf_data=_macroFull.sector||{};
-    updateSigPage(state,_quotes);
-    updateScanPage(_scan,_corr);
-    updateNewsPage(state,_today,_macroFull);
-    updateMacroPage(state,_macroFull);
-    updateHistPage(state);
-    updateSetPage(state);
+    _quotes  = qData.quotes||{};
+    _scan    = scData;
+    _macroFull = mData;
+    // 整合
+    stData.fred_data       = mData.fred||{};
+    stData.us_futures_data = mData.futures||{};
+    stData.sector_etf_data = mData.sector||{};
+    // 非關鍵數據（背景載入）
+    safeGet('/api/correlation',{}).then(d=>{ _corr=d; updateScanPage(_scan,_corr); });
+    safeGet('/api/today',{}).then(d=>{ _today=d; updateNewsPage(stData,_today,_macroFull); });
+    // 立刻更新所有頁面
+    updateSigPage(stData, _quotes);
+    updateScanPage(_scan, _corr);
+    updateNewsPage(stData, _today, _macroFull);
+    updateMacroPage(stData, _macroFull);
+    updateHistPage(stData);
+    updateSetPage(stData);
     document.getElementById('last-upd').textContent=new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
   }catch(e){
-    console.error(e);
-    document.getElementById('last-upd').textContent='更新失敗';
+    console.error('refreshAll error:',e);
+    document.getElementById('last-upd').textContent='更新失敗，重試中...';
+    setTimeout(refreshAll, 5000);
   }
 }
 
