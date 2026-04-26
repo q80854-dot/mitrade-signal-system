@@ -1,15 +1,19 @@
 """
-app.py v5.2 — 主程式（修復版）
+app.py v5.2 — 主程式（最終修復版）
 修復項目：
-  Bug 1: _scan_symbol AI 調整後分數仍低於門檻卻進入訊號列表
+  Bug 1: AI 調整後分數仍低於門檻卻進入訊號列表
   Bug 2: expire_old() 過期訊號 DB result 未更新
-  Bug 3: Render.com 休眠後排程器不重啟 + keep-alive
+  Bug 3: 冷啟動保護（付費版 Render，無需 keep-alive）
   Bug 4: trump_data 失敗時無回退值
   Bug 5: daily_briefing AI 失敗時無降級邏輯
   Bug 6: 週末不掃加密貨幣
   Bug 7: expire_old() 後 signal_log 未重新載入
+變更：
+  - 移除美股品種掃描（NVDA/MSFT/AAPL 等）
+  - 移除 keep-alive（Render 付費版永不休眠）
+  - 專注外匯、商品、加密、指數
 """
-import logging, threading, time, urllib.request
+import logging, threading, time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
 from flask import Flask, render_template, jsonify, request
@@ -28,9 +32,16 @@ import os as _os
 _tpl = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),"templates")
 app  = Flask(__name__, template_folder=_tpl)
 
-# 加密貨幣品種清單（週末仍可交易）
+# ═══════════════════════════════════════
+# 品種分類設定
+# ═══════════════════════════════════════
+# 加密貨幣（週末仍可交易，24/7）
 CRYPTO_CATS    = {"加密"}
 CRYPTO_SYMBOLS = {"BTCUSD","ETHUSD","XRPUSD","SOLUSD","BNBUSD","LTCUSD"}
+
+# 美股品種（排除掃描，只監控）
+STOCK_CATS     = {"美股"}
+STOCK_SYMBOLS  = {"NVDA","MSFT","AAPL","AMZN","GOOGL","META","TSLA","AMD","INTC","NFLX"}
 
 # ═══════════════════════════════════════
 # SystemState
@@ -85,7 +96,7 @@ class SystemState:
             record_signal_loss(sig.get("risk_usd",0))
 
     def expire_old(self):
-        # ★ Bug 2 修復：過期時同步更新 result 和 signal_log
+        # ★ Bug 2+7 修復：同步更新 result 並重新載入 signal_log
         with self._lock:
             now=datetime.now(timezone.utc); valid=[]
             for s in self.active_signals:
@@ -95,7 +106,7 @@ class SystemState:
                         valid.append(s)
                     else:
                         s["status"]="expired"
-                        s["result"]="expired"  # ★ 同步記憶體 result
+                        s["result"]="expired"
                         store.update_signal_result(s.get("id",""),"expired",s.get("pnl",0))
                         self.expired_signals.append(s)
                         logger.info(f"訊號過期：{s.get('symbol','')} score={s.get('score',0):.1f}")
@@ -103,8 +114,7 @@ class SystemState:
                     valid.append(s)
             self.active_signals=valid
             self.expired_signals=self.expired_signals[-200:]
-            # ★ Bug 7 修復：過期後重新載入 signal_log
-            self.signal_log=store.load_signal_log(500)
+            self.signal_log=store.load_signal_log(500)  # ★ Bug 7
 
     def calc_win_rate(self):
         stats=store.get_trade_stats()
@@ -166,7 +176,7 @@ def update_all_data():
         logger.info(f"市場機制：{state.regime.get('regime_zh','—')}")
     except Exception as e: logger.warning(f"regime: {e}")
 
-    # ★ Bug 5 修復：更新 env_status 文字（根據時段和掃描狀態）
+    # ★ Bug 5 修復：更新 env_status 文字
     is_weekend = state.market_session.get("session") == "weekend"
     if is_weekend:
         state.system_status["env_status"] = "週末・加密監控中"
@@ -174,12 +184,9 @@ def update_all_data():
         state.system_status["env_status"] = "初始化中"
     else:
         env_score = state.system_status.get("env_score", 50)
-        if env_score >= 70:
-            state.system_status["env_status"] = "適合交易"
-        elif env_score >= 40:
-            state.system_status["env_status"] = "環境中性"
-        else:
-            state.system_status["env_status"] = "環境偏差"
+        if env_score >= 70:   state.system_status["env_status"] = "適合交易"
+        elif env_score >= 40: state.system_status["env_status"] = "環境中性"
+        else:                 state.system_status["env_status"] = "環境偏差"
 
     logger.info("✅ 數據更新完成")
 
@@ -267,35 +274,42 @@ def run_scan():
         vix=state.macro_data.get("vix",{}).get("price","—"); regime_zh=state.regime.get("regime_zh","正常")
         logger.info(f"環境分={env} 時段={sess} VIX={vix} 機制={regime_zh}")
         if env<20: safe_send(f"🚨 VIX={vix}，今日訊號暫停",priority=1); return
+
         ec=state.earnings_calendar; today=datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if ec:
             te=[e for e in ec if e.get("date","").startswith(today)]
             if te and state.should_send_alert(f"earnings_{today}"):
                 from telegram_bot import format_alert_message
-                safe_send(format_alert_message("📅 今日財報提醒",f"以下品種今日發布財報：{', '.join([e.get('symbol','') for e in te])}\n⚠️ 財報前後波動劇烈","earnings"),priority=3)
+                safe_send(format_alert_message("📅 今日財報提醒",
+                    f"以下品種今日發布財報：{', '.join([e.get('symbol','') for e in te])}\n⚠️ 財報前後波動劇烈",
+                    "earnings"),priority=3)
 
-        # ★ Bug 6 修復：週末只掃加密貨幣
+        # ★ Bug 6 修復：週末只掃加密 / 平日排除美股
         is_weekend = state.market_session.get("session") == "weekend"
         if is_weekend:
+            # 週末：只掃加密貨幣（24/7）
             syms_to_scan = sorted(
                 [s for s in SYMBOLS
                  if not SYMBOLS[s].get("monitor_only")
                  and (SYMBOLS[s].get("cat") in CRYPTO_CATS or s in CRYPTO_SYMBOLS)],
                 key=lambda s: SYMBOLS[s].get("priority", 3)
             )
-            logger.info(f"🌙 週末模式：只掃加密貨幣，共 {len(syms_to_scan)} 個品種: {syms_to_scan}")
+            logger.info(f"🌙 週末模式：只掃加密貨幣，共 {len(syms_to_scan)} 個：{syms_to_scan}")
             if not syms_to_scan:
-                logger.info("週末無加密貨幣品種可掃描")
-                state.scan_count += 1
-                state.last_scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                watchdog.ping()
-                return
+                logger.info("週末無加密貨幣品種，跳過掃描")
+                state.scan_count+=1
+                state.last_scan_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                watchdog.ping(); return
         else:
+            # 平日：排除美股，只掃外匯/商品/加密/指數
             syms_to_scan = sorted(
-                [s for s in SYMBOLS if not SYMBOLS[s].get("monitor_only")],
+                [s for s in SYMBOLS
+                 if not SYMBOLS[s].get("monitor_only")
+                 and SYMBOLS[s].get("cat") not in STOCK_CATS
+                 and s not in STOCK_SYMBOLS],
                 key=lambda s: SYMBOLS[s].get("priority", 3)
             )
-            logger.info(f"📊 平日模式：全品種掃描，共 {len(syms_to_scan)} 個品種")
+            logger.info(f"📊 平日模式（無美股）：共 {len(syms_to_scan)} 個品種：{syms_to_scan}")
 
         new_signals=[]
         for symbol in syms_to_scan:
@@ -308,7 +322,9 @@ def run_scan():
                     store.set_consec_loss(symbol,0)
                 time.sleep(1)
             except Exception as e: logger.error(f"掃描 {symbol} 異常: {e}")
-        state.scan_count+=1; state.last_scan_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        state.scan_count+=1
+        state.last_scan_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         watchdog.ping()
         logger.info(f"=== 掃描完成 新訊號:{len(new_signals)} 有效:{len(state.active_signals)} ===")
         if state.scan_count%3==0:
@@ -335,7 +351,7 @@ def check_trump():
                         from telegram_bot import format_trump_alert
                         safe_send(format_trump_alert(post),priority=1)
         else:
-            logger.warning("check_trump: monitor_trump_posts 回傳空資料")
+            logger.warning("check_trump: 回傳空資料")
         state.last_trump_check=datetime.now(timezone.utc).strftime("%H:%M UTC")
     except Exception as e:
         logger.error(f"Trump check: {e}")
@@ -366,9 +382,9 @@ def morning_briefing():
         state.daily_briefing={
             "ai_available":False,
             "overall_environment":"適合交易" if env_score>=70 else "今日觀望" if env_score<40 else "謹慎操作",
-            "environment_reason":f"VIX {vix:.1f}，恐懼貪婪指數 {fg:.0f}，{regime_zh}",
-            "best_opportunities":(["BTCUSD（加密 24/7）","ETHUSD（加密 24/7）"] if is_weekend
-                                  else ["BTCUSD","XAUUSD（黃金避險）"] if vix<25 else []),
+            "environment_reason":f"VIX {vix:.1f}，恐懼貪婪 {fg:.0f}，{regime_zh}",
+            "best_opportunities":(["BTCUSD（加密 24/7）","ETHUSD"] if is_weekend
+                                  else ["BTCUSD","XAUUSD","EURUSD"] if vix<25 else []),
             "avoid_today":[f"高波動品種（VIX={vix:.1f}）"] if vix>=30 else [],
             "generated_at":today,
         }
@@ -399,14 +415,15 @@ def api_state():
         if not state.macro_data.get("_initialized"):
             threading.Thread(target=_quick_macro_update,daemon=True).start()
 
-        # ★ Bug 3 修復：偵測長時間未掃描時自動重新觸發
+        # ★ Bug 3 修復（付費版）：啟動超過 10 分鐘仍未掃描才補觸發
         import time as _t
-        scan_interval_sec=SYSTEM["scan_interval_min"]*60
-        last_ping=getattr(watchdog,"_last_ping",0)
-        time_since_ping=_t.time()-last_ping
-        if time_since_ping>scan_interval_sec*2:
-            logger.warning(f"⚠️ 系統閒置 {time_since_ping/60:.1f} 分鐘，自動重新觸發掃描")
+        if not hasattr(api_state,"_start_time"):
+            api_state._start_time=_t.time()
+        uptime=_t.time()-api_state._start_time
+        if state.scan_count==0 and uptime>600:
+            logger.warning("⚠️ 啟動超過 10 分鐘仍未掃描，補觸發一次")
             threading.Thread(target=run_scan,daemon=True).start()
+            api_state._start_time=_t.time()
 
         return jsonify(snap)
     except Exception as e: return jsonify({"error":str(e)}),500
@@ -446,8 +463,10 @@ def api_performance():
 
 @app.route("/api/regime")
 def api_regime():
-    return jsonify({"regime":state.regime,"macro_summary":{"vix":state.macro_data.get("vix",{}).get("price",0),
-        "fg":state.macro_data.get("fear_greed",{}).get("score",50),"sp500_chg":state.macro_data.get("sp500",{}).get("chg",0)}})
+    return jsonify({"regime":state.regime,"macro_summary":{
+        "vix":state.macro_data.get("vix",{}).get("price",0),
+        "fg":state.macro_data.get("fear_greed",{}).get("score",50),
+        "sp500_chg":state.macro_data.get("sp500",{}).get("chg",0)}})
 
 @app.route("/api/backtest/<symbol>")
 def api_backtest_symbol(symbol):
@@ -512,10 +531,14 @@ def api_quotes():
         d=macro.get(mk)
         if d:
             si=SYMBOLS.get(sym,{})
-            quotes[sym]={"name":si.get("name",sym),"price":d.get("price",0),"chg":d.get("chg",0),"emoji":si.get("emoji","📊"),"cat":si.get("cat","")}
+            quotes[sym]={"name":si.get("name",sym),"price":d.get("price",0),"chg":d.get("chg",0),
+                         "emoji":si.get("emoji","📊"),"cat":si.get("cat","")}
     for sig in state.active_signals:
         sym=sig.get("symbol","")
-        if sym in quotes: quotes[sym]["has_signal"]=True; quotes[sym]["direction"]=sig.get("direction",""); quotes[sym]["score"]=sig.get("score",0)
+        if sym in quotes:
+            quotes[sym]["has_signal"]=True
+            quotes[sym]["direction"]=sig.get("direction","")
+            quotes[sym]["score"]=sig.get("score",0)
     return jsonify({"quotes":quotes,"count":len(quotes)})
 
 @app.route("/api/scan_summary")
@@ -523,17 +546,21 @@ def api_scan_summary():
     sigs=[{"symbol":s.get("symbol",""),"name":s.get("name",""),"emoji":s.get("emoji",""),
            "direction":s.get("direction","none"),"score":s.get("score",0),"action":s.get("action",""),
            "entry":s.get("entry_price",0),"sl":s.get("stop_loss",0),"tp1":s.get("tp1",0),
-           "rr1":s.get("rr1",0),"ai_rec":s.get("ai_recommendation",""),"kelly_pct":s.get("kelly_risk_pct",0)} for s in state.active_signals]
+           "rr1":s.get("rr1",0),"ai_rec":s.get("ai_recommendation",""),"kelly_pct":s.get("kelly_risk_pct",0)}
+          for s in state.active_signals]
     macro=state.macro_data
     return jsonify({"signals":sigs,"total":len(sigs),
-        "env":{"vix":macro.get("vix",{}).get("price",0),"env_score":state.system_status.get("env_score",70),
-               "session":state.market_session.get("session_zh",""),"regime":state.regime.get("regime_zh","")},
+        "env":{"vix":macro.get("vix",{}).get("price",0),
+               "env_score":state.system_status.get("env_score",70),
+               "session":state.market_session.get("session_zh",""),
+               "regime":state.regime.get("regime_zh","")},
         "last_scan":state.last_scan_time})
 
 @app.route("/api/signal/<sig_id>/result", methods=["POST"])
 def api_signal_result(sig_id):
     data=request.get_json() or {}; result=data.get("result",""); pnl=float(data.get("pnl",0))
-    if result not in ["tp1","tp2","sl","expired"]: return jsonify({"error":"result 必須是 tp1/tp2/sl/expired"}),400
+    if result not in ["tp1","tp2","sl","expired"]:
+        return jsonify({"error":"result 必須是 tp1/tp2/sl/expired"}),400
     store.update_signal_result(sig_id,result,pnl)
     with state._lock:
         for s in state.active_signals:
@@ -577,7 +604,8 @@ def api_briefing_generate():
         try:
             from ai_analyst import generate_daily_briefing
             b=generate_daily_briefing(state.macro_data,state.trump_data)
-            state.daily_briefing=b; state.last_briefing_date=datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            state.daily_briefing=b
+            state.last_briefing_date=datetime.now(timezone.utc).strftime("%Y-%m-%d")
             from telegram_bot import format_briefing_message
             safe_send(format_briefing_message(b),priority=4)
         except Exception as e: logger.error(f"briefing generate: {e}")
@@ -590,7 +618,8 @@ def api_watchdog_status():
     elapsed=_t.time()-watchdog._last_ping
     queue_sz=len(getattr(__import__("watchdog"),"rate_limiter",object())._queue) if hasattr(__import__("watchdog"),"rate_limiter") else 0
     return jsonify({"last_ping_ago_sec":round(elapsed),"last_ping_ago_min":round(elapsed/60,1),
-        "fail_count":watchdog._fail_count,"status":"healthy" if elapsed<1800 else "warning" if elapsed<3600 else "dead",
+        "fail_count":watchdog._fail_count,
+        "status":"healthy" if elapsed<1800 else "warning" if elapsed<3600 else "dead",
         "telegram_queue":queue_sz,"scan_count":state.scan_count,"last_scan_time":state.last_scan_time})
 
 @app.route("/api/correlation")
@@ -605,12 +634,14 @@ def api_correlation():
         except: pass
     sl=list(prices.keys())
     mat={s1:{s2:(1.0 if s1==s2 else calc_rolling_correlation(prices[s1],prices[s2],20)) for s2 in sl} for s1 in sl}
-    return jsonify({"matrix":mat,"symbols":sl,"high_corr":[[s1,s2,mat[s1][s2]] for s1 in sl for s2 in sl if s1<s2 and abs(mat[s1].get(s2,0))>=0.7]})
+    return jsonify({"matrix":mat,"symbols":sl,
+        "high_corr":[[s1,s2,mat[s1][s2]] for s1 in sl for s2 in sl if s1<s2 and abs(mat[s1].get(s2,0))>=0.7]})
 
 @app.route("/api/kelly")
 def api_kelly():
     from config import ACCOUNT_BALANCE_USD
-    wr=float(request.args.get("win_rate",0)); rr=float(request.args.get("rr",0)); bal=float(request.args.get("balance",ACCOUNT_BALANCE_USD))
+    wr=float(request.args.get("win_rate",0)); rr=float(request.args.get("rr",0))
+    bal=float(request.args.get("balance",ACCOUNT_BALANCE_USD))
     if not wr or not rr:
         stats=store.get_trade_stats(); wr=wr or stats.get("win_rate",50)/100; rr=rr or 1.6
     else: wr/=100
@@ -624,14 +655,20 @@ def api_equity():
     balance=ACCOUNT_BALANCE_USD; points=[{"balance":balance,"trade":None}]
     for t in trades:
         balance+=t.get("pnl",0)
-        points.append({"balance":round(balance,2),"symbol":t.get("symbol",""),"direction":t.get("direction",""),"result":t.get("result",""),"pnl":t.get("pnl",0),"date":t.get("generated","")[:10]})
-    return jsonify({"points":points,"raw_curve":curve[-200:],"n_points":len(points),"start":ACCOUNT_BALANCE_USD,"current":round(balance,2),"total_pnl":round(balance-ACCOUNT_BALANCE_USD,2),"return_pct":round((balance-ACCOUNT_BALANCE_USD)/ACCOUNT_BALANCE_USD*100,2)})
+        points.append({"balance":round(balance,2),"symbol":t.get("symbol",""),
+                        "direction":t.get("direction",""),"result":t.get("result",""),
+                        "pnl":t.get("pnl",0),"date":t.get("generated","")[:10]})
+    return jsonify({"points":points,"raw_curve":curve[-200:],"n_points":len(points),
+        "start":ACCOUNT_BALANCE_USD,"current":round(balance,2),
+        "total_pnl":round(balance-ACCOUNT_BALANCE_USD,2),
+        "return_pct":round((balance-ACCOUNT_BALANCE_USD)/ACCOUNT_BALANCE_USD*100,2)})
 
 @app.route("/api/alert/test", methods=["POST"])
 def api_alert_test():
     from config import TELEGRAM_BOT_TOKEN
     if not TELEGRAM_BOT_TOKEN: return jsonify({"ok":False,"error":"TELEGRAM_BOT_TOKEN 未設定"}),400
-    safe_send(f"✅ <b>Telegram 測試訊息</b>\n\nMitrade AI v{state.version} 連接正常\n時間：{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",priority=1)
+    safe_send(f"✅ <b>Telegram 測試訊息</b>\n\nMitrade AI v{state.version} 連接正常\n"
+              f"時間：{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",priority=1)
     return jsonify({"ok":True,"message":"測試訊息已發送"})
 
 @app.route("/api/scan/force", methods=["POST"])
@@ -649,7 +686,8 @@ def api_settings():
     if request.method=="GET":
         return jsonify({"min_score":SIGNAL_THRESHOLDS["min_score"],"min_rr":SIGNAL_THRESHOLDS["min_rr"],
             "risk_per_trade_pct":CIRCUIT_BREAKER["risk_per_trade_pct"],"max_lot":CIRCUIT_BREAKER["max_lot"],
-            "scan_interval_min":SYSTEM["scan_interval_min"],"vix_extreme":CIRCUIT_BREAKER["vix_extreme"],"vix_threshold":CIRCUIT_BREAKER["vix_threshold"]})
+            "scan_interval_min":SYSTEM["scan_interval_min"],"vix_extreme":CIRCUIT_BREAKER["vix_extreme"],
+            "vix_threshold":CIRCUIT_BREAKER["vix_threshold"]})
     data=request.get_json() or {}; changed=[]
     if "min_score" in data: SIGNAL_THRESHOLDS["min_score"]=float(data["min_score"]); changed.append(f"min_score={data['min_score']}")
     if "min_rr" in data: SIGNAL_THRESHOLDS["min_rr"]=float(data["min_rr"]); changed.append(f"min_rr={data['min_rr']}")
@@ -672,64 +710,58 @@ def api_news(symbol):
 def health(): return "OK",200
 
 # ═══════════════════════════════════════
-# 排程器
+# 排程器（Render 付費版，永不休眠）
 # ═══════════════════════════════════════
 def start_scheduler():
     try:
         s=BackgroundScheduler(timezone="UTC")
-        s.add_job(run_scan,"interval",minutes=SYSTEM["scan_interval_min"],id="scan",misfire_grace_time=60,max_instances=1,coalesce=True)
-        s.add_job(check_trump,"interval",minutes=SYSTEM["trump_check_min"],id="trump",misfire_grace_time=60,max_instances=1,coalesce=True)
-        s.add_job(morning_briefing,"cron",hour=0,minute=30,id="briefing",misfire_grace_time=300,max_instances=1)
-        s.add_job(poll_commands,"interval",seconds=10,id="commands",misfire_grace_time=15,max_instances=1,coalesce=True)
-        s.start(); logger.info("✅ 排程器啟動")
+        s.add_job(run_scan,"interval",minutes=SYSTEM["scan_interval_min"],
+                  id="scan",misfire_grace_time=60,max_instances=1,coalesce=True)
+        s.add_job(check_trump,"interval",minutes=SYSTEM["trump_check_min"],
+                  id="trump",misfire_grace_time=60,max_instances=1,coalesce=True)
+        s.add_job(morning_briefing,"cron",hour=0,minute=30,
+                  id="briefing",misfire_grace_time=300,max_instances=1)
+        s.add_job(poll_commands,"interval",seconds=10,
+                  id="commands",misfire_grace_time=15,max_instances=1,coalesce=True)
+        s.start()
+        logger.info("✅ 排程器啟動")
+
         def _startup():
             time.sleep(3)
             try:
                 from data_fetcher import fetch_macro_data,fetch_market_status
-                state.macro_data=fetch_macro_data(); state.market_session=fetch_market_status()
+                state.macro_data=fetch_macro_data()
+                state.market_session=fetch_market_status()
                 state.regime=detect_regime(state.macro_data)
             except Exception as e: logger.error(f"初始宏觀: {e}")
+
             time.sleep(10)
             safe_send(
                 f"🚀 <b>Mitrade AI v{state.version} 已啟動</b>\n\n"
-                f"監控品種：{len(SYMBOLS)} 個\n"
+                f"監控品種：外匯 / 商品 / 加密 / 指數\n"
                 f"市場機制：{state.regime.get('regime_zh','初始化中')}\n"
                 f"掃描頻率：每 {SYSTEM['scan_interval_min']} 分鐘\n"
                 f"時段：{state.market_session.get('session_zh','—')}\n\n"
                 f"輸入 /help 查看指令",
                 priority=5
             )
+
             time.sleep(20)
             try: check_trump()
             except: pass
+
             time.sleep(10)
             try: morning_briefing()
             except Exception as e: logger.error(f"初始簡報: {e}")
+
             time.sleep(5)
             try:
                 logger.info("🔄 啟動後首次掃描...")
                 run_scan()
             except Exception as e: logger.error(f"初始掃描: {e}")
+
         threading.Thread(target=_startup,daemon=True).start()
     except Exception as e: logger.error(f"排程器錯誤: {e}")
-
-# ★ Bug 3 修復：keep-alive 防止 Render.com 休眠
-def _keep_alive():
-    time.sleep(120)  # 等待啟動完成後再開始
-    base_url=_os.getenv("RENDER_EXTERNAL_URL","")
-    if not base_url:
-        logger.info("非 Render 環境，跳過 keep-alive")
-        return
-    logger.info(f"✅ Keep-alive 啟動，每 10 分鐘 ping {base_url}/health")
-    while True:
-        try:
-            urllib.request.urlopen(f"{base_url}/health",timeout=10)
-            logger.debug("Keep-alive ping ✓")
-        except Exception as e:
-            logger.debug(f"Keep-alive ping 失敗: {e}")
-        time.sleep(600)  # 每 10 分鐘
-
-threading.Thread(target=_keep_alive,daemon=True).start()
 
 start_scheduler()
 
