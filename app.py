@@ -221,8 +221,10 @@ def _scan_symbol(symbol):
         mtf=check_multi_timeframe(tf); direction=mtf.get("direction","none"); score=mtf.get("score",0)
         if direction not in allowed: logger.info(f"  [{symbol}] Regime 過濾：{direction} 不在允許方向"); return None
         state._last_scores[symbol]=score
-        if score<THRESH["min_score"] or direction=="none":
-            logger.info(f"  [{symbol}] Step5 ❌ 分數不足（{score}<{THRESH['min_score']}）"); return None
+      cat_min = SYMBOLS.get(symbol, {}).get("cat", "")
+from signal_engine import CATEGORY_PARAMS, _get_cat_params
+cp_min = _get_cat_params(symbol).get("min_score", THRESH["min_score"])
+if composite_score < cp_min: return None
 
         entry_data=tf.get("entry",{}); indicators=calc_all_indicators(entry_data)
         auto=auto_composite_score(macro_data=state.macro_data,indicators=indicators,
