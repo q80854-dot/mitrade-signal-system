@@ -1,71 +1,73 @@
-"""
-config.py v5.2
-"""
+""" config.py v5.2 — 修正版（移除美股、更新備用數據） """
 import os
 from dotenv import load_dotenv
 load_dotenv()
 
-GROK_API_KEY       = os.getenv("GROK_API_KEY", "")
-FINNHUB_API_KEY    = os.getenv("FINNHUB_API_KEY", "")
-ALPHA_VANTAGE_KEY  = os.getenv("ALPHA_VANTAGE_KEY", "")
-FRED_API_KEY       = os.getenv("FRED_API_KEY", "")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "8091656090")
+GROK_API_KEY        = os.getenv("GROK_API_KEY", "")
+FINNHUB_API_KEY     = os.getenv("FINNHUB_API_KEY", "")
+ALPHA_VANTAGE_KEY   = os.getenv("ALPHA_VANTAGE_KEY", "")
+FRED_API_KEY        = os.getenv("FRED_API_KEY", "")
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "8091656090")
+ACCOUNT_BALANCE_USD = float(os.getenv("ACCOUNT_BALANCE_USD", "3000"))
 
-ACCOUNT_BALANCE_USD     = float(os.getenv("ACCOUNT_BALANCE_USD", "3000"))
 MAX_RISK_PER_TRADE      = 0.03
 MAX_DAILY_RISK          = 0.06
 MAX_SIMULTANEOUS_TRADES = 3
 MIN_ACCOUNT_FOR_INDEX   = 1500
 MIN_ACCOUNT_FOR_STOCK   = 500
 
+# ★ 移除美股品種，只保留外匯/商品/加密/指數
 OVERNIGHT_SWAP = {
-    "EURUSD": {"buy":-2.50,"sell": 1.80}, "GBPUSD": {"buy":-3.20,"sell": 2.10},
-    "USDJPY": {"buy": 1.50,"sell":-2.80}, "AUDUSD": {"buy":-2.00,"sell": 1.20},
-    "USDCAD": {"buy": 1.30,"sell":-2.50}, "XAUUSD": {"buy":-3.50,"sell": 1.00},
-    "WTI":    {"buy":-4.00,"sell": 2.00}, "BTCUSD": {"buy":-15.0,"sell":10.00},
-    "ETHUSD": {"buy":-8.00,"sell": 5.00}, "US500":  {"buy":-2.00,"sell": 0.80},
-    "NAS100": {"buy":-3.00,"sell": 1.00}, "US30":   {"buy":-2.50,"sell": 0.90},
-    "HK50":   {"buy":-5.00,"sell": 2.00}, "GER40":  {"buy":-2.00,"sell": 0.70},
-    "AAPL":   {"buy":-1.50,"sell": 0.50}, "NVDA":   {"buy":-2.00,"sell": 0.80},
-    "TSLA":   {"buy":-3.00,"sell": 1.20}, "MSFT":   {"buy":-1.50,"sell": 0.50},
-    "AMZN":   {"buy":-2.00,"sell": 0.70}, "GOOGL":  {"buy":-1.80,"sell": 0.60},
+    "EURUSD": {"buy":-2.50,"sell": 1.80},
+    "GBPUSD": {"buy":-3.20,"sell": 2.10},
+    "USDJPY": {"buy": 1.50,"sell":-2.80},
+    "AUDUSD": {"buy":-2.00,"sell": 1.20},
+    "USDCAD": {"buy": 1.30,"sell":-2.50},
+    "XAUUSD": {"buy":-3.50,"sell": 1.00},
+    "WTI":    {"buy":-4.00,"sell": 2.00},
+    "BTCUSD": {"buy":-15.0,"sell":10.00},
+    "ETHUSD": {"buy":-8.00,"sell": 5.00},
+    "US500":  {"buy":-2.00,"sell": 0.80},
+    "NAS100": {"buy":-3.00,"sell": 1.00},
+    "US30":   {"buy":-2.50,"sell": 0.90},
+    "HK50":   {"buy":-5.00,"sell": 2.00},
+    "GER40":  {"buy":-2.00,"sell": 0.70},
 }
 
 TYPICAL_SPREAD = {
     "EURUSD":0.0002,"GBPUSD":0.0003,"USDJPY":0.03,"AUDUSD":0.0003,"USDCAD":0.0003,
     "XAUUSD":0.30,"WTI":0.05,"BTCUSD":30.0,"ETHUSD":2.0,
     "US500":0.5,"NAS100":1.5,"US30":5.0,"HK50":5.0,"GER40":1.5,
-    "AAPL":0.05,"NVDA":0.10,"TSLA":0.15,"MSFT":0.10,"AMZN":0.10,"GOOGL":0.10,
 }
 
+# ★ SYMBOLS：移除全部美股，只保留外匯/商品/加密/指數
 SYMBOLS = {
-    "EURUSD":{"yahoo":"EURUSD=X","av":"EUR","name":"EUR/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","ECB","CPI","非農"]},
-    "GBPUSD":{"yahoo":"GBPUSD=X","av":"GBP","name":"GBP/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","BOE","英國CPI"]},
-    "USDJPY":{"yahoo":"JPY=X","av":"JPY","name":"USD/JPY","cat":"外匯","pip":0.01,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["Fed","BOJ","日本干預"]},
-    "AUDUSD":{"yahoo":"AUDUSD=X","av":"AUD","name":"AUD/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["中國PMI","鐵礦石"]},
-    "USDCAD":{"yahoo":"CAD=X","av":"CAD","name":"USD/CAD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["原油","BOC"]},
-    "XAUUSD":{"yahoo":"GC=F","av":"XAU","name":"黃金 XAU/USD","cat":"商品","pip":0.1,"atr_mult":2.0,"priority":1,"emoji":"🥇","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","VIX","川普"]},
-    "WTI":   {"yahoo":"CL=F","av":"WTI","name":"WTI 原油","cat":"商品","pip":0.01,"atr_mult":2.0,"priority":2,"emoji":"🛢️","min_lot":0.01,"min_account":0,"special_conditions":True,"drivers":["EIA","OPEC","中東"]},
-    "BTCUSD":{"yahoo":"BTC-USD","av":"BTC","name":"Bitcoin BTC/USD","cat":"加密","pip":1.0,"atr_mult":2.5,"priority":2,"emoji":"₿","min_lot":0.01,"min_account":0,"drivers":["恐懼貪婪","川普"]},
-    "ETHUSD":{"yahoo":"ETH-USD","av":"ETH","name":"Ethereum ETH/USD","cat":"加密","pip":0.1,"atr_mult":2.5,"priority":3,"emoji":"⟠","min_lot":0.01,"min_account":0,"drivers":["BTC走勢"]},
-    "US500": {"yahoo":"^GSPC","av":"SPY","name":"S&P 500","cat":"指數","pip":0.1,"atr_mult":2.0,"priority":2,"emoji":"📈","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["Fed","財報季","VIX"]},
-    "NAS100":{"yahoo":"^NDX","av":"QQQ","name":"納斯達克 100","cat":"指數","pip":0.1,"atr_mult":2.5,"priority":2,"emoji":"💻","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["科技股財報","Fed"]},
-    "US30":  {"yahoo":"^DJI","av":"DIA","name":"道瓊工業","cat":"指數","pip":1.0,"atr_mult":2.0,"priority":2,"emoji":"🏭","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["工業股財報","Fed"]},
-    "HK50":  {"yahoo":"^HSI","av":"EWH","name":"恒生指數","cat":"指數","pip":1.0,"atr_mult":2.0,"priority":3,"emoji":"🇭🇰","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["中國政策","人民幣"]},
-    "GER40": {"yahoo":"^GDAXI","av":"EWG","name":"德國 DAX 40","cat":"指數","pip":0.1,"atr_mult":2.0,"priority":3,"emoji":"🇩🇪","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["ECB","歐元區PMI"]},
-    "AAPL":  {"yahoo":"AAPL","av":"AAPL","name":"蘋果 Apple","cat":"美股","pip":0.01,"atr_mult":2.0,"priority":2,"emoji":"🍎","min_lot":0.1,"min_account":500,"account_warning":True,"earnings_sensitive":True,"drivers":["財報","iPhone","中國"]},
-    "NVDA":  {"yahoo":"NVDA","av":"NVDA","name":"輝達 NVIDIA","cat":"美股","pip":0.01,"atr_mult":3.0,"priority":2,"emoji":"🖥️","min_lot":0.1,"min_account":500,"account_warning":True,"earnings_sensitive":True,"drivers":["AI需求","財報","出口限制"]},
-    "TSLA":  {"yahoo":"TSLA","av":"TSLA","name":"特斯拉 Tesla","cat":"美股","pip":0.01,"atr_mult":3.5,"priority":2,"emoji":"⚡","min_lot":0.1,"min_account":500,"account_warning":True,"earnings_sensitive":True,"drivers":["馬斯克","財報","電動車"]},
-    "MSFT":  {"yahoo":"MSFT","av":"MSFT","name":"微軟 Microsoft","cat":"美股","pip":0.01,"atr_mult":2.0,"priority":3,"emoji":"🪟","min_lot":0.1,"min_account":500,"account_warning":True,"earnings_sensitive":True,"drivers":["Azure","AI","財報"]},
-    "AMZN":  {"yahoo":"AMZN","av":"AMZN","name":"亞馬遜 Amazon","cat":"美股","pip":0.01,"atr_mult":2.5,"priority":3,"emoji":"📦","min_lot":0.1,"min_account":500,"account_warning":True,"earnings_sensitive":True,"drivers":["AWS","零售","財報"]},
-    "GOOGL": {"yahoo":"GOOGL","av":"GOOGL","name":"Alphabet Google","cat":"美股","pip":0.01,"atr_mult":2.0,"priority":3,"emoji":"🔍","min_lot":0.1,"min_account":500,"account_warning":True,"earnings_sensitive":True,"drivers":["廣告","AI","財報"]},
+    # 外匯
+    "EURUSD": {"yahoo":"EURUSD=X","av":"EUR","name":"EUR/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","ECB","CPI","非農"]},
+    "GBPUSD": {"yahoo":"GBPUSD=X","av":"GBP","name":"GBP/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","BOE","英國CPI"]},
+    "USDJPY": {"yahoo":"JPY=X",   "av":"JPY","name":"USD/JPY","cat":"外匯","pip":0.01,  "atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["Fed","BOJ","日本干預"]},
+    "AUDUSD": {"yahoo":"AUDUSD=X","av":"AUD","name":"AUD/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["中國PMI","鐵礦石"]},
+    "USDCAD": {"yahoo":"CAD=X",   "av":"CAD","name":"USD/CAD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["原油","BOC"]},
+    # 商品
+    "XAUUSD": {"yahoo":"GC=F","av":"XAU","name":"黃金 XAU/USD","cat":"商品","pip":0.1,"atr_mult":2.0,"priority":1,"emoji":"🥇","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","VIX","川普"]},
+    "WTI":    {"yahoo":"CL=F","av":"WTI","name":"WTI 原油",    "cat":"商品","pip":0.01,"atr_mult":2.0,"priority":2,"emoji":"🛢️","min_lot":0.01,"min_account":0,"special_conditions":True,"drivers":["EIA","OPEC","中東"]},
+    # 加密
+    "BTCUSD": {"yahoo":"BTC-USD","av":"BTC","name":"Bitcoin BTC/USD",    "cat":"加密","pip":1.0,"atr_mult":2.5,"priority":1,"emoji":"₿", "min_lot":0.01,"min_account":0,"drivers":["恐懼貪婪","川普"]},
+    "ETHUSD": {"yahoo":"ETH-USD","av":"ETH","name":"Ethereum ETH/USD","cat":"加密","pip":0.1,"atr_mult":2.5,"priority":2,"emoji":"⟠","min_lot":0.01,"min_account":0,"drivers":["BTC走勢"]},
+    # 指數
+    "US500":  {"yahoo":"^GSPC","av":"SPY","name":"S&P 500",      "cat":"指數","pip":0.1,"atr_mult":2.0,"priority":2,"emoji":"📈","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["Fed","財報季","VIX"]},
+    "NAS100": {"yahoo":"^NDX","av":"QQQ","name":"納斯達克 100","cat":"指數","pip":0.1,"atr_mult":2.5,"priority":2,"emoji":"💻","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["科技股財報","Fed"]},
+    "US30":   {"yahoo":"^DJI","av":"DIA","name":"道瓊工業",      "cat":"指數","pip":1.0,"atr_mult":2.0,"priority":2,"emoji":"🏭","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["工業股財報","Fed"]},
+    "HK50":   {"yahoo":"^HSI","av":"EWH","name":"恒生指數",      "cat":"指數","pip":1.0,"atr_mult":2.0,"priority":3,"emoji":"🇭🇰","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["中國政策","人民幣"]},
+    "GER40":  {"yahoo":"^GDAXI","av":"EWG","name":"德國 DAX 40","cat":"指數","pip":0.1,"atr_mult":2.0,"priority":3,"emoji":"🇩🇪","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["ECB","歐元區PMI"]},
 }
 
 SECTOR_ETFS = {
     "XLK":"科技","XLF":"金融","XLE":"能源","XLV":"醫療","XLY":"消費",
     "XLI":"工業","XLB":"材料","XLRE":"房地產","XLU":"公用事業","XLC":"通訊","XLP":"必需消費",
 }
+
 US_FUTURES = {
     "ES=F":"S&P500期貨","NQ=F":"納斯達克期貨","YM=F":"道瓊期貨","GC=F":"黃金期貨","CL=F":"原油期貨",
 }
@@ -106,9 +108,13 @@ SIGNAL_THRESHOLDS = {
 }
 THRESH = SIGNAL_THRESHOLDS
 
+# ★ 移除美股相關品種群組
 CORRELATION_GROUPS = [
-    ["EURUSD","GBPUSD","AUDUSD"],["XAUUSD","EURUSD"],["WTI","USDCAD"],
-    ["BTCUSD","ETHUSD"],["US500","NAS100","US30"],["AAPL","MSFT","NVDA","GOOGL","AMZN"],
+    ["EURUSD","GBPUSD","AUDUSD"],
+    ["XAUUSD","EURUSD"],
+    ["WTI","USDCAD"],
+    ["BTCUSD","ETHUSD"],
+    ["US500","NAS100","US30"],
 ]
 
 SYSTEM = {
