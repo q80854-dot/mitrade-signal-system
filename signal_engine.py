@@ -16,7 +16,7 @@ CATEGORY_PARAMS = {
     "指數":   {"min_score":60,"min_adx":18,"sl_mult":1.1,"tp1_mult":1.8,"tp2_mult":3.2,"max_hold_days":14,"require_bull_market":True,"vix_max":32},
     "美股":   {"min_score":62,"min_adx":18,"sl_mult":1.2,"tp1_mult":2.0,"tp2_mult":3.8,"max_hold_days":12,"earnings_blackout":7},
 }
-TIER_D_SYMBOLS = {"TSLA","WTI","HK50","AUDUSD","USDCAD"}
+TIER_D_SYMBOLS = {"TSLA"}
 
 def _get_cat_params(symbol):
     cat=SYMBOLS.get(symbol,{}).get("cat","")
