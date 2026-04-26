@@ -1,7 +1,15 @@
 """
-app.py v5.2 — 主程式
+app.py v5.2 — 主程式（修復版）
+修復項目：
+  Bug 1: _scan_symbol AI 調整後分數仍低於門檻卻進入訊號列表
+  Bug 2: expire_old() 過期訊號 DB result 未更新
+  Bug 3: Render.com 休眠後排程器不重啟 + keep-alive
+  Bug 4: trump_data 失敗時無回退值
+  Bug 5: daily_briefing AI 失敗時無降級邏輯
+  Bug 6: 週末不掃加密貨幣
+  Bug 7: expire_old() 後 signal_log 未重新載入
 """
-import logging, threading, time
+import logging, threading, time, urllib.request
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
 from flask import Flask, render_template, jsonify, request
@@ -19,6 +27,10 @@ logger = logging.getLogger(__name__)
 import os as _os
 _tpl = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),"templates")
 app  = Flask(__name__, template_folder=_tpl)
+
+# 加密貨幣品種清單（週末仍可交易）
+CRYPTO_CATS    = {"加密"}
+CRYPTO_SYMBOLS = {"BTCUSD","ETHUSD","XRPUSD","SOLUSD","BNBUSD","LTCUSD"}
 
 # ═══════════════════════════════════════
 # SystemState
@@ -73,17 +85,26 @@ class SystemState:
             record_signal_loss(sig.get("risk_usd",0))
 
     def expire_old(self):
+        # ★ Bug 2 修復：過期時同步更新 result 和 signal_log
         with self._lock:
             now=datetime.now(timezone.utc); valid=[]
             for s in self.active_signals:
                 exp=s.get("expires_at")
                 try:
-                    if exp and now<datetime.fromisoformat(exp): valid.append(s)
+                    if exp and now<datetime.fromisoformat(exp):
+                        valid.append(s)
                     else:
-                        s["status"]="expired"; store.update_signal_result(s.get("id",""),"expired")
+                        s["status"]="expired"
+                        s["result"]="expired"  # ★ 同步記憶體 result
+                        store.update_signal_result(s.get("id",""),"expired",s.get("pnl",0))
                         self.expired_signals.append(s)
-                except: valid.append(s)
-            self.active_signals=valid; self.expired_signals=self.expired_signals[-200:]
+                        logger.info(f"訊號過期：{s.get('symbol','')} score={s.get('score',0):.1f}")
+                except:
+                    valid.append(s)
+            self.active_signals=valid
+            self.expired_signals=self.expired_signals[-200:]
+            # ★ Bug 7 修復：過期後重新載入 signal_log
+            self.signal_log=store.load_signal_log(500)
 
     def calc_win_rate(self):
         stats=store.get_trade_stats()
@@ -144,6 +165,22 @@ def update_all_data():
         state.macro_data["regime"]=state.regime
         logger.info(f"市場機制：{state.regime.get('regime_zh','—')}")
     except Exception as e: logger.warning(f"regime: {e}")
+
+    # ★ Bug 5 修復：更新 env_status 文字（根據時段和掃描狀態）
+    is_weekend = state.market_session.get("session") == "weekend"
+    if is_weekend:
+        state.system_status["env_status"] = "週末・加密監控中"
+    elif state.scan_count == 0:
+        state.system_status["env_status"] = "初始化中"
+    else:
+        env_score = state.system_status.get("env_score", 50)
+        if env_score >= 70:
+            state.system_status["env_status"] = "適合交易"
+        elif env_score >= 40:
+            state.system_status["env_status"] = "環境中性"
+        else:
+            state.system_status["env_status"] = "環境偏差"
+
     logger.info("✅ 數據更新完成")
 
 # ═══════════════════════════════════════
@@ -212,6 +249,11 @@ def _scan_symbol(symbol):
         except Exception as e:
             logger.warning(f"  [{symbol}] AI跳過: {e}"); sig["ai_recommendation"]="等待"
 
+        # ★ Bug 1 修復：AI 調整後再次確認分數門檻
+        if sig["score"] < THRESH["min_score"]:
+            logger.info(f"  [{symbol}] ❌ AI調整後分數不足（{sig['score']:.1f}<{THRESH['min_score']}），過濾")
+            return None
+
         logger.info(f"  [{symbol}] ✅ 訊號輸出 分數={sig['score']:.1f} 方向={direction}")
         return sig
     except Exception as e:
@@ -231,7 +273,30 @@ def run_scan():
             if te and state.should_send_alert(f"earnings_{today}"):
                 from telegram_bot import format_alert_message
                 safe_send(format_alert_message("📅 今日財報提醒",f"以下品種今日發布財報：{', '.join([e.get('symbol','') for e in te])}\n⚠️ 財報前後波動劇烈","earnings"),priority=3)
-        syms_to_scan=sorted([s for s in SYMBOLS if not SYMBOLS[s].get("monitor_only")],key=lambda s:SYMBOLS[s].get("priority",3))
+
+        # ★ Bug 6 修復：週末只掃加密貨幣
+        is_weekend = state.market_session.get("session") == "weekend"
+        if is_weekend:
+            syms_to_scan = sorted(
+                [s for s in SYMBOLS
+                 if not SYMBOLS[s].get("monitor_only")
+                 and (SYMBOLS[s].get("cat") in CRYPTO_CATS or s in CRYPTO_SYMBOLS)],
+                key=lambda s: SYMBOLS[s].get("priority", 3)
+            )
+            logger.info(f"🌙 週末模式：只掃加密貨幣，共 {len(syms_to_scan)} 個品種: {syms_to_scan}")
+            if not syms_to_scan:
+                logger.info("週末無加密貨幣品種可掃描")
+                state.scan_count += 1
+                state.last_scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                watchdog.ping()
+                return
+        else:
+            syms_to_scan = sorted(
+                [s for s in SYMBOLS if not SYMBOLS[s].get("monitor_only")],
+                key=lambda s: SYMBOLS[s].get("priority", 3)
+            )
+            logger.info(f"📊 平日模式：全品種掃描，共 {len(syms_to_scan)} 個品種")
+
         new_signals=[]
         for symbol in syms_to_scan:
             try:
@@ -255,21 +320,33 @@ def run_scan():
     except Exception as e: logger.error(f"run_scan 異常: {e}"); watchdog.record_failure(str(e))
 
 def check_trump():
+    # ★ Bug 4 修復：失敗時設回退值
     try:
         from ai_analyst import monitor_trump_posts
-        trump=monitor_trump_posts(); state.trump_data=trump
-        state.macro_data["trump_event_type"]=trump.get("main_event_type","none")
-        state.macro_data["trump_data"]=trump
-        for post in trump.get("posts",[]):
-            if post.get("impact_level")=="high":
-                key=f"trump_{post.get('original_text','')[:30]}"
-                if state.should_send_alert(key):
-                    from telegram_bot import format_trump_alert
-                    safe_send(format_trump_alert(post),priority=1)
+        trump=monitor_trump_posts()
+        if trump:
+            state.trump_data=trump
+            state.macro_data["trump_event_type"]=trump.get("main_event_type","none")
+            state.macro_data["trump_data"]=trump
+            for post in trump.get("posts",[]):
+                if post.get("impact_level")=="high":
+                    key=f"trump_{post.get('original_text','')[:30]}"
+                    if state.should_send_alert(key):
+                        from telegram_bot import format_trump_alert
+                        safe_send(format_trump_alert(post),priority=1)
+        else:
+            logger.warning("check_trump: monitor_trump_posts 回傳空資料")
         state.last_trump_check=datetime.now(timezone.utc).strftime("%H:%M UTC")
-    except Exception as e: logger.error(f"Trump check: {e}")
+    except Exception as e:
+        logger.error(f"Trump check: {e}")
+        if not state.trump_data:
+            state.trump_data={
+                "has_impact_posts":False,"posts":[],
+                "overall_market_mood":"neutral","main_event_type":"none","error":str(e)
+            }
 
 def morning_briefing():
+    # ★ Bug 5 修復：AI 失敗時用宏觀數據生成降級版簡報
     today=datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if state.last_briefing_date==today: return
     try:
@@ -278,7 +355,24 @@ def morning_briefing():
         state.daily_briefing=b; state.last_briefing_date=today
         from telegram_bot import format_briefing_message
         safe_send(format_briefing_message(b),priority=4)
-    except Exception as e: logger.error(f"Briefing: {e}")
+    except Exception as e:
+        logger.error(f"Briefing AI 失敗，使用降級版: {e}")
+        macro=state.macro_data
+        vix=macro.get("vix",{}).get("price",0)
+        fg=macro.get("fear_greed",{}).get("score",50)
+        regime_zh=state.regime.get("regime_zh","正常市場")
+        env_score=state.system_status.get("env_score",70)
+        is_weekend=state.market_session.get("session")=="weekend"
+        state.daily_briefing={
+            "ai_available":False,
+            "overall_environment":"適合交易" if env_score>=70 else "今日觀望" if env_score<40 else "謹慎操作",
+            "environment_reason":f"VIX {vix:.1f}，恐懼貪婪指數 {fg:.0f}，{regime_zh}",
+            "best_opportunities":(["BTCUSD（加密 24/7）","ETHUSD（加密 24/7）"] if is_weekend
+                                  else ["BTCUSD","XAUUSD（黃金避險）"] if vix<25 else []),
+            "avoid_today":[f"高波動品種（VIX={vix:.1f}）"] if vix>=30 else [],
+            "generated_at":today,
+        }
+        state.last_briefing_date=today
 
 def poll_commands():
     try:
@@ -304,6 +398,16 @@ def api_state():
         snap=state.get_snapshot()
         if not state.macro_data.get("_initialized"):
             threading.Thread(target=_quick_macro_update,daemon=True).start()
+
+        # ★ Bug 3 修復：偵測長時間未掃描時自動重新觸發
+        import time as _t
+        scan_interval_sec=SYSTEM["scan_interval_min"]*60
+        last_ping=getattr(watchdog,"_last_ping",0)
+        time_since_ping=_t.time()-last_ping
+        if time_since_ping>scan_interval_sec*2:
+            logger.warning(f"⚠️ 系統閒置 {time_since_ping/60:.1f} 分鐘，自動重新觸發掃描")
+            threading.Thread(target=run_scan,daemon=True).start()
+
         return jsonify(snap)
     except Exception as e: return jsonify({"error":str(e)}),500
 
@@ -586,15 +690,46 @@ def start_scheduler():
                 state.regime=detect_regime(state.macro_data)
             except Exception as e: logger.error(f"初始宏觀: {e}")
             time.sleep(10)
-            safe_send(f"🚀 <b>Mitrade AI v{state.version} 已啟動</b>\n\n監控品種：{len(SYMBOLS)} 個\n市場機制：{state.regime.get('regime_zh','初始化中')}\n掃描頻率：每 {SYSTEM['scan_interval_min']} 分鐘\n\n輸入 /help 查看指令",priority=5)
+            safe_send(
+                f"🚀 <b>Mitrade AI v{state.version} 已啟動</b>\n\n"
+                f"監控品種：{len(SYMBOLS)} 個\n"
+                f"市場機制：{state.regime.get('regime_zh','初始化中')}\n"
+                f"掃描頻率：每 {SYSTEM['scan_interval_min']} 分鐘\n"
+                f"時段：{state.market_session.get('session_zh','—')}\n\n"
+                f"輸入 /help 查看指令",
+                priority=5
+            )
             time.sleep(20)
             try: check_trump()
             except: pass
-            time.sleep(30)
-            try: morning_briefing(); run_scan()
+            time.sleep(10)
+            try: morning_briefing()
+            except Exception as e: logger.error(f"初始簡報: {e}")
+            time.sleep(5)
+            try:
+                logger.info("🔄 啟動後首次掃描...")
+                run_scan()
             except Exception as e: logger.error(f"初始掃描: {e}")
         threading.Thread(target=_startup,daemon=True).start()
     except Exception as e: logger.error(f"排程器錯誤: {e}")
+
+# ★ Bug 3 修復：keep-alive 防止 Render.com 休眠
+def _keep_alive():
+    time.sleep(120)  # 等待啟動完成後再開始
+    base_url=_os.getenv("RENDER_EXTERNAL_URL","")
+    if not base_url:
+        logger.info("非 Render 環境，跳過 keep-alive")
+        return
+    logger.info(f"✅ Keep-alive 啟動，每 10 分鐘 ping {base_url}/health")
+    while True:
+        try:
+            urllib.request.urlopen(f"{base_url}/health",timeout=10)
+            logger.debug("Keep-alive ping ✓")
+        except Exception as e:
+            logger.debug(f"Keep-alive ping 失敗: {e}")
+        time.sleep(600)  # 每 10 分鐘
+
+threading.Thread(target=_keep_alive,daemon=True).start()
 
 start_scheduler()
 
