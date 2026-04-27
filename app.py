@@ -1,18 +1,13 @@
 """
-app.py v5.2 — 完整最終版（含自動模擬績效）
+app.py v5.3 — 超短線完整最終版
 所有修復：
-  ★ 新增 simulate_pending_signals() — 自動模擬止盈/止損結果
-  ★ 新增 /api/simulate/force — 手動觸發模擬
-  Bug 1: composite_score NameError
-  Bug 2: expire_old() DB result 未更新
-  Bug 3: market_session 快取過期（weekday 停留昨天）
-  Bug 4: trump_data 失敗無回退值
-  Bug 5: daily_briefing 降級版
-  Bug 6: 週末只掃加密
-  Bug 7: signal_log 未重新載入
-  Bug 8: watchdog 例外後 dead
-  Bug 9: Sharpe 亂數（scoring_engine 已修）
-  移除美股，Render 付費版無需 keep-alive
+  ★ 超短線：掃描間隔 5 分鐘，訊號 1 小時過期
+  ★ 自動績效追蹤（check_signal_outcomes）
+  ★ market_session 每次 api/state 即時更新
+  ★ Sharpe Inf/NaN 防護
+  ★ 移除美股所有相關邏輯
+  ★ watchdog 例外後也 ping
+  ★ signal_expire 到期後自動結算
 """
 import logging, threading, time, math
 from datetime import datetime, timezone, timedelta
@@ -24,8 +19,7 @@ from state_store import store
 from watchdog import watchdog, safe_send, checker
 from scoring_engine import (calc_composite_score, kelly_position_size,
                               calc_performance_metrics, detect_regime,
-                              check_portfolio_correlation, apply_slippage,
-                              auto_simulate_signal_result)
+                              check_portfolio_correlation, apply_slippage)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -60,7 +54,7 @@ class SystemState:
         self.last_briefing_date: Optional[str] = None
         self.scan_count:         int = 0
         self.signal_count:       int = 0
-        self.version             = "5.2.0"
+        self.version             = "5.3.0"
         self._lock               = threading.Lock()
         self._last_scores:       dict = {}
         self.regime:             Dict = {}
@@ -89,12 +83,11 @@ class SystemState:
             self.active_signals = [s for s in self.active_signals
                                    if not (s.get("symbol") == symbol and s.get("direction") == direction)]
             self.active_signals.append(sig)
-            self.active_signals = sorted(self.active_signals,
-                                         key=lambda x: x.get("score", 0), reverse=True)[:20]
+            self.active_signals = sorted(self.active_signals, key=lambda x: x.get("score",0), reverse=True)[:20]
             store.save_signal(sig)
-            self.signal_log = store.load_signal_log(500)
+            self.signal_log  = store.load_signal_log(500)
             self.signal_count += 1
-            store.append_equity(float(_os.getenv("ACCOUNT_BALANCE_USD", "3000")))
+            store.append_equity(float(_os.getenv("ACCOUNT_BALANCE_USD","3000")))
             from risk_manager import record_signal_loss
             record_signal_loss(sig.get("risk_usd", 0))
 
@@ -110,7 +103,7 @@ class SystemState:
                     else:
                         s["status"] = "expired"
                         s["result"] = "expired"
-                        store.update_signal_result(s.get("id",""), "expired", s.get("pnl", 0))
+                        store.update_signal_result(s.get("id",""), "expired", s.get("pnl",0))
                         self.expired_signals.append(s)
                 except:
                     valid.append(s)
@@ -130,8 +123,8 @@ class SystemState:
             trades = store.get_trade_list()
             perf   = calc_performance_metrics(equity, trades) if len(equity) >= 2 else {}
             if perf and "sharpe" in perf:
-                if not math.isfinite(perf.get("sharpe", 0) or 0):
-                    perf["sharpe"] = 0
+                v = perf.get("sharpe", 0) or 0
+                if not math.isfinite(v): perf["sharpe"] = 0
             return {
                 "active_signals":    list(self.active_signals),
                 "macro_data":        dict(self.macro_data),
@@ -155,52 +148,6 @@ class SystemState:
             }
 
 state = SystemState()
-
-# ═══════════════════════════════════════
-# ★ 自動模擬績效
-# ═══════════════════════════════════════
-def simulate_pending_signals():
-    """
-    每次掃描後自動檢查所有 pending 訊號
-    根據當前市場價格判斷是否觸及 TP1/SL/過期
-    """
-    from data_fetcher import fetch_ohlcv
-    pending = [s for s in state.signal_log if s.get("result") == "pending"]
-    if not pending:
-        return
-    logger.info(f"[AutoSim] 開始模擬 {len(pending)} 筆 pending 訊號")
-    simulated_count = 0
-    for sig in pending:
-        symbol = sig.get("symbol","")
-        if not symbol or symbol not in SYMBOLS:
-            continue
-        try:
-            # 取最新價格
-            tf_data = fetch_ohlcv(symbol, "entry")
-            if not tf_data:
-                continue
-            current_price = tf_data.get("current_price", 0)
-            if not current_price:
-                continue
-            result = auto_simulate_signal_result(sig, current_price)
-            if result:
-                sig_id = sig.get("id","")
-                store.update_signal_result(sig_id, result["result"], result["pnl"])
-                # 更新連虧計數
-                if result["result"] == "sl":
-                    store.set_consec_loss(symbol, store.get_consec_loss(symbol)+1)
-                elif result["result"] in ["tp1","tp2"]:
-                    store.set_consec_loss(symbol, 0)
-                # 更新資金曲線
-                balance = float(_os.getenv("ACCOUNT_BALANCE_USD","3000"))
-                store.append_equity(balance + result["pnl"])
-                simulated_count += 1
-                logger.info(f"[AutoSim] {symbol} → {result['result']} pnl=${result['pnl']}")
-        except Exception as e:
-            logger.debug(f"[AutoSim] {symbol} 模擬失敗: {e}")
-    if simulated_count > 0:
-        state.signal_log = store.load_signal_log(500)
-        logger.info(f"[AutoSim] 完成，共模擬 {simulated_count} 筆")
 
 # ═══════════════════════════════════════
 # 數據更新
@@ -260,7 +207,7 @@ def _scan_symbol(symbol):
         logger.info(f"  [{symbol}] ⏸️ 防連虧暫停（已連虧{consec}次）")
         return None
     regime  = state.regime
-    allowed = regime.get("allowed_directions", ["buy", "sell"])
+    allowed = regime.get("allowed_directions", ["buy","sell"])
     if not allowed:
         logger.info(f"  [{symbol}] 市場機制停止交易")
         return None
@@ -270,72 +217,88 @@ def _scan_symbol(symbol):
         from risk_manager           import run_all_checks
         from indicators             import calc_all_indicators
         from adaptive_weight_engine import auto_composite_score, record_weight_history
+
         tf = fetch_all_timeframes(symbol)
         if not tf: return None
         for tf_key, tf_data in tf.items():
             q = checker.validate_ohlcv(tf_data, f"{symbol}_{tf_key}")
             if q["valid"] and q["data"].get("data_quality",{}).get("cleaned"):
                 tf[tf_key] = q["data"]
-        price = tf.get("entry",{}).get("current_price", 0)
-        logger.info(f"  [{symbol}] Step1 ✅ 現價={price:.4f}")
+
+        price = tf.get("entry",{}).get("current_price",0)
+        logger.info(f"  [{symbol}] 現價={price:.4f}")
+
         risk = run_all_checks(symbol, tf, state.macro_data, state.active_signals)
         if not risk.get("can_signal"):
             reason = (risk.get("blockers",["未知"])[0][:50] if risk.get("blockers") else "風控阻止")
-            logger.info(f"  [{symbol}] Step3 ⛔ {reason}")
+            logger.info(f"  [{symbol}] ⛔ {reason}")
             return None
+
         mtf       = check_multi_timeframe(tf)
         direction = mtf.get("direction","none")
-        score     = mtf.get("score", 0)
+        score     = mtf.get("score",0)
         if direction not in allowed:
-            logger.info(f"  [{symbol}] Regime 過濾：{direction} 不在允許方向")
+            logger.info(f"  [{symbol}] Regime 過濾")
             return None
         state._last_scores[symbol] = score
+
         cp_min = _get_cat_params(symbol).get("min_score", THRESH["min_score"])
         if score < cp_min or direction == "none":
-            logger.info(f"  [{symbol}] Step5 ❌ MTF分數不足（{score}<{cp_min}）")
+            logger.info(f"  [{symbol}] ❌ MTF分數不足（{score}<{cp_min}）")
             return None
+
         entry_data = tf.get("entry",{})
         indicators = calc_all_indicators(entry_data)
-        # ★ 先定義 composite_score 再使用
+
+        # ★ 先定義 composite_score 再使用（修正 NameError）
         auto = auto_composite_score(
             macro_data=state.macro_data, indicators=indicators,
             trump_data=state.trump_data, symbol=symbol,
             category=SYMBOLS.get(symbol,{}).get("cat",""))
         record_weight_history(auto)
         composite_score = auto["composite_100"]
-        logger.info(f"  [{symbol}] 自適應評分={composite_score:.1f} 主導={auto['dominant_state']}")
+        logger.info(f"  [{symbol}] 自適應評分={composite_score:.1f}")
+
         if composite_score < cp_min:
-            logger.info(f"  [{symbol}] ❌ 自適應分數不足（{composite_score:.1f}<{cp_min}）")
+            logger.info(f"  [{symbol}] ❌ 自適應分數不足")
             return None
+
         sig = generate_signal(symbol, tf, state.macro_data)
         if not sig: return None
+
         sig["score"]          = composite_score
         sig["dominant_state"] = auto["dominant_state"]
+
         corr = check_portfolio_correlation(symbol, direction, state.active_signals)
         if corr["correlated"]:
             sig["risk_warnings"] = [corr["message"]]
             sig["score"]         = max(0, sig["score"] + corr["score_penalty"])
         else:
             sig["risk_warnings"] = risk.get("warnings",[])
-        size_mult = regime.get("size_multiplier", 1.0)
+
+        size_mult = regime.get("size_multiplier",1.0)
         if size_mult != 1.0:
             sig["suggested_lot"]     = round(sig.get("suggested_lot",0.01)*size_mult, 2)
             sig["regime_adjustment"] = f"機制調整倉位 x{size_mult}"
+
         try:
             from ai_analyst import analyze_signal
             ai  = analyze_signal(sig, state.macro_data, state.trump_data)
-            adj = ai.get("macro_score_adjustment", 0)
+            adj = ai.get("macro_score_adjustment",0)
             sig["ai_recommendation"] = ai.get("final_recommendation","等待")
             sig["ai_reason"]         = ai.get("recommendation_reason","")
-            sig["score"] = max(0, min(100, sig["score"]+adj+risk.get("score_adj",0)))
+            sig["score"] = max(0, min(100, sig["score"] + adj + risk.get("score_adj",0)))
         except Exception as e:
             logger.warning(f"  [{symbol}] AI跳過: {e}")
             sig["ai_recommendation"] = "等待"
+
         if sig["score"] < THRESH["min_score"]:
-            logger.info(f"  [{symbol}] ❌ AI調整後分數不足（{sig['score']:.1f}<{THRESH['min_score']}）")
+            logger.info(f"  [{symbol}] ❌ AI調整後分數不足")
             return None
+
         logger.info(f"  [{symbol}] ✅ 訊號輸出 分數={sig['score']:.1f} 方向={direction}")
         return sig
+
     except Exception as e:
         logger.error(f"  [{symbol}] 掃描異常: {e}")
         watchdog.record_failure(str(e))
@@ -347,19 +310,25 @@ def run_scan():
     try:
         update_all_data()
         state.expire_old()
-        # ★ 每次掃描後自動模擬 pending 訊號
+
+        # ★ 自動績效追蹤
         try:
-            simulate_pending_signals()
+            from performance_tracker import check_signal_outcomes
+            settled = check_signal_outcomes(state)
+            if settled: logger.info(f"自動結算 {len(settled)} 個訊號")
         except Exception as e:
-            logger.warning(f"simulate_pending_signals: {e}")
+            logger.warning(f"績效追蹤: {e}")
+
         env       = state.system_status.get("env_score",100)
         sess      = state.market_session.get("session_zh","—")
         vix       = state.macro_data.get("vix",{}).get("price","—")
         regime_zh = state.regime.get("regime_zh","正常")
         logger.info(f"環境分={env} 時段={sess} VIX={vix} 機制={regime_zh}")
+
         if env < 20:
             safe_send(f"🚨 VIX={vix}，今日訊號暫停", priority=1)
             return
+
         ec    = state.earnings_calendar
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if ec:
@@ -370,24 +339,29 @@ def run_scan():
                     "📅 今日財報提醒",
                     f"以下品種今日發布財報：{', '.join([e.get('symbol','') for e in te])}\n⚠️ 財報前後波動劇烈",
                     "earnings"), priority=3)
+
         is_weekend = state.market_session.get("session") == "weekend"
         if is_weekend:
             syms_to_scan = sorted(
-                [s for s in SYMBOLS if not SYMBOLS[s].get("monitor_only")
+                [s for s in SYMBOLS
+                 if not SYMBOLS[s].get("monitor_only")
                  and (SYMBOLS[s].get("cat") in CRYPTO_CATS or s in CRYPTO_SYMBOLS)],
-                key=lambda s: SYMBOLS[s].get("priority", 3))
+                key=lambda s: SYMBOLS[s].get("priority",3))
             logger.info(f"🌙 週末模式：只掃加密，共 {len(syms_to_scan)} 個")
             if not syms_to_scan:
-                state.scan_count += 1
+                state.scan_count    += 1
                 state.last_scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                watchdog.ping(); return
+                watchdog.ping()
+                return
         else:
             syms_to_scan = sorted(
-                [s for s in SYMBOLS if not SYMBOLS[s].get("monitor_only")
+                [s for s in SYMBOLS
+                 if not SYMBOLS[s].get("monitor_only")
                  and SYMBOLS[s].get("cat") not in STOCK_CATS
                  and s not in STOCK_SYMBOLS],
-                key=lambda s: SYMBOLS[s].get("priority", 3))
-            logger.info(f"📊 平日模式（無美股）：共 {len(syms_to_scan)} 個")
+                key=lambda s: SYMBOLS[s].get("priority",3))
+            logger.info(f"📊 平日模式（無美股）：共 {len(syms_to_scan)} 個品種")
+
         new_signals = []
         for symbol in syms_to_scan:
             try:
@@ -398,14 +372,16 @@ def run_scan():
                     from telegram_bot import format_signal_message
                     safe_send(format_signal_message(sig), priority=2)
                     store.set_consec_loss(symbol, 0)
-                time.sleep(1)
+                time.sleep(0.5)  # 超短線減少等待時間
             except Exception as e:
                 logger.error(f"掃描 {symbol} 異常: {e}")
+
         state.scan_count    += 1
         state.last_scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         watchdog.ping()
         logger.info(f"=== 掃描完成 新訊號:{len(new_signals)} 有效:{len(state.active_signals)} ===")
-        if state.scan_count % 3 == 0:
+
+        if state.scan_count % 6 == 0:  # 每 6 次掃描（30分鐘）發一次摘要
             from telegram_bot import format_scan_summary
             wr = state.calc_win_rate()
             safe_send(format_scan_summary(
@@ -413,6 +389,7 @@ def run_scan():
                 active_count=len(state.active_signals), scores=state._last_scores,
                 session=sess, vix=vix, regime_zh=regime_zh,
                 win_rate=wr.get("win_rate",0)), priority=8)
+
     except Exception as e:
         logger.error(f"run_scan 異常: {e}")
         watchdog.record_failure(str(e))
@@ -457,19 +434,19 @@ def morning_briefing():
     except Exception as e:
         logger.error(f"Briefing AI 失敗，使用降級版: {e}")
         macro      = state.macro_data
-        vix        = macro.get("vix",{}).get("price", 0)
-        fg         = macro.get("fear_greed",{}).get("score", 50)
+        vix        = macro.get("vix",{}).get("price",0)
+        fg         = macro.get("fear_greed",{}).get("score",50)
         regime_zh  = state.regime.get("regime_zh","正常市場")
-        env_score  = state.system_status.get("env_score", 70)
+        env_score  = state.system_status.get("env_score",70)
         is_weekend = state.market_session.get("session") == "weekend"
         state.daily_briefing = {
-            "ai_available":        False,
-            "overall_environment": ("適合交易" if env_score>=70 else "今日觀望" if env_score<40 else "謹慎操作"),
-            "environment_reason":  f"VIX {vix:.1f}，恐懼貪婪 {fg:.0f}，{regime_zh}",
-            "best_opportunities":  (["BTCUSD（加密 24/7）","ETHUSD"] if is_weekend
-                                    else ["BTCUSD","XAUUSD","EURUSD"] if vix<25 else []),
-            "avoid_today":         [f"高波動品種（VIX={vix:.1f}）"] if vix>=30 else [],
-            "generated_at":        today,
+            "ai_available":      False,
+            "overall_environment":("適合交易" if env_score>=70 else "今日觀望" if env_score<40 else "謹慎操作"),
+            "environment_reason": f"VIX {vix:.1f}，恐懼貪婪 {fg:.0f}，{regime_zh}",
+            "best_opportunities": (["BTCUSD（加密 24/7）","ETHUSD"] if is_weekend
+                                   else ["XAUUSD（黃金）","GBPUSD","EURUSD"] if vix<25 else []),
+            "avoid_today":        [f"高波動品種（VIX={vix:.1f}）"] if vix>=30 else [],
+            "generated_at":       today,
         }
         state.last_briefing_date = today
 
@@ -498,44 +475,46 @@ def dashboard():
 @app.route("/api/state")
 def api_state():
     try:
-        # ★ 每次都更新 market_session，防止殘留昨天日期
+        # ★ 每次即時更新 market_session（防止殘留昨天日期）
         try:
             from data_fetcher import fetch_market_status
             state.market_session = fetch_market_status()
-        except Exception as e:
-            logger.debug(f"market_session refresh: {e}")
+        except Exception as e: logger.debug(f"market_session: {e}")
+
         snap = state.get_snapshot()
+
+        # ★ 雙重過濾美股
+        snap["active_signals"] = [
+            s for s in snap.get("active_signals",[])
+            if s.get("category") not in STOCK_CATS and s.get("symbol") not in STOCK_SYMBOLS
+        ]
+
         if not state.macro_data.get("_initialized"):
             threading.Thread(target=_quick_macro_update, daemon=True).start()
+
         import time as _t
-        if not hasattr(api_state,"_start_time"):
-            api_state._start_time = _t.time()
-        uptime = _t.time() - api_state._start_time
-        if state.scan_count == 0 and uptime > 600:
-            logger.warning("⚠️ 啟動超過 10 分鐘仍未掃描，補觸發")
+        if not hasattr(api_state,"_start_time"): api_state._start_time = _t.time()
+        if state.scan_count == 0 and _t.time()-api_state._start_time > 600:
+            logger.warning("⚠️ 啟動超過 10 分鐘仍未掃描，補觸發一次")
             threading.Thread(target=run_scan, daemon=True).start()
             api_state._start_time = _t.time()
+
         return jsonify(snap)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error":str(e)}), 500
 
 
 def _quick_macro_update():
     try:
         from data_fetcher import fetch_macro_data, fetch_market_status
         macro = fetch_macro_data()
-        if macro:
-            macro["_initialized"] = True
-            state.macro_data = macro
+        if macro: macro["_initialized"] = True; state.macro_data = macro
         state.market_session = fetch_market_status()
-    except Exception as e:
-        logger.warning(f"Quick macro: {e}")
+    except Exception as e: logger.warning(f"Quick macro: {e}")
 
 
 @app.route("/api/signals")
-def api_signals():
-    return jsonify({"signals":state.active_signals,"count":len(state.active_signals)})
-
+def api_signals(): return jsonify({"signals":state.active_signals,"count":len(state.active_signals)})
 
 @app.route("/api/macro")
 def api_macro():
@@ -547,34 +526,36 @@ def api_macro():
                     "futures":state.us_futures_data,"sector":state.sector_etf_data,
                     "eco_calendar":eco,"regime":state.regime})
 
-
 @app.route("/api/history")
 def api_history():
     log = store.load_signal_log(100)
     return jsonify({"history":log,"total":len(log),"win_rate":state.calc_win_rate()})
 
-
 @app.route("/api/performance")
 def api_performance():
     equity = store.get_equity_curve()
     trades = store.get_trade_list()
-    perf   = calc_performance_metrics(equity,trades) if len(equity)>=2 else {"valid":False}
-    if perf and "sharpe" in perf and not math.isfinite(perf.get("sharpe",0) or 0):
-        perf["sharpe"] = 0
+    perf   = calc_performance_metrics(equity, trades) if len(equity)>=2 else {"valid":False}
+    if perf and "sharpe" in perf:
+        v = perf.get("sharpe",0) or 0
+        if not math.isfinite(v): perf["sharpe"] = 0
     stats = store.get_trade_stats()
     wr    = stats.get("win_rate",50)/100
-    kelly = kelly_position_size(wr,1.6,3000)
+    kelly = kelly_position_size(wr, 1.6, 3000)
+    # ★ 加入真實績效
+    try:
+        from performance_tracker import get_real_performance
+        real = get_real_performance(state)
+    except Exception: real = {}
     return jsonify({"performance":perf,"stats":stats,"kelly":kelly,
-                    "equity_curve":equity[-100:],"n_trades":len(trades)})
-
+                    "equity_curve":equity[-100:],"n_trades":len(trades),"real":real})
 
 @app.route("/api/regime")
 def api_regime():
     return jsonify({"regime":state.regime,"macro_summary":{
-        "vix":       state.macro_data.get("vix",{}).get("price",0),
-        "fg":        state.macro_data.get("fear_greed",{}).get("score",50),
-        "sp500_chg": state.macro_data.get("sp500",{}).get("chg",0)}})
-
+        "vix":state.macro_data.get("vix",{}).get("price",0),
+        "fg": state.macro_data.get("fear_greed",{}).get("score",50),
+        "sp500_chg":state.macro_data.get("sp500",{}).get("chg",0)}})
 
 @app.route("/api/backtest/<symbol>")
 def api_backtest_symbol(symbol):
@@ -583,9 +564,8 @@ def api_backtest_symbol(symbol):
     min_score = float(request.args.get("min_score",65))
     try:
         from backtester import backtest_symbol
-        return jsonify(backtest_symbol(symbol,min_score=min_score))
+        return jsonify(backtest_symbol(symbol, min_score=min_score))
     except Exception as e: return jsonify({"error":str(e)}),500
-
 
 @app.route("/api/backtest/walkforward/<symbol>")
 def api_walkforward(symbol):
@@ -594,20 +574,17 @@ def api_walkforward(symbol):
         return jsonify(walk_forward_backtest(symbol.upper()))
     except Exception as e: return jsonify({"error":str(e)}),500
 
-
 @app.route("/api/backtest/all")
 def api_backtest_all():
     def _run():
         from backtester import run_full_backtest; run_full_backtest()
-    threading.Thread(target=_run,daemon=True).start()
+    threading.Thread(target=_run, daemon=True).start()
     return jsonify({"message":"批量回測已開始"})
-
 
 @app.route("/api/backtest/results")
 def api_backtest_results():
     symbol = request.args.get("symbol")
-    return jsonify({"results":store.load_backtest(symbol,limit=20)})
-
+    return jsonify({"results":store.load_backtest(symbol, limit=20)})
 
 @app.route("/api/scoring/<symbol>")
 def api_scoring(symbol):
@@ -625,22 +602,17 @@ def api_scoring(symbol):
         return jsonify({"symbol":symbol,"scoring":sc,"mtf":mtf,"adx":ind.get("adx_value",0)})
     except Exception as e: return jsonify({"error":str(e)}),500
 
-
 @app.route("/api/weights")
 def api_weights():
     from adaptive_weight_engine import calc_adaptive_weights, get_weight_history
     result = calc_adaptive_weights(macro_data=state.macro_data)
     return jsonify({"current":result,"history":get_weight_history()[-20:],"regime":state.regime})
 
-
 @app.route("/api/stats")
-def api_stats():
-    return jsonify({"overall":store.get_trade_stats(),"scan_count":state.scan_count})
-
+def api_stats(): return jsonify({"overall":store.get_trade_stats(),"scan_count":state.scan_count})
 
 @app.route("/api/earnings")
 def api_earnings(): return jsonify({"earnings":state.earnings_calendar})
-
 
 @app.route("/api/quotes")
 def api_quotes():
@@ -659,14 +631,13 @@ def api_quotes():
             quotes[sym]["score"]      = sig.get("score",0)
     return jsonify({"quotes":quotes,"count":len(quotes)})
 
-
 @app.route("/api/scan_summary")
 def api_scan_summary():
-    sigs=[{"symbol":s.get("symbol",""),"name":s.get("name",""),"emoji":s.get("emoji",""),
-           "direction":s.get("direction","none"),"score":s.get("score",0),"action":s.get("action",""),
-           "entry":s.get("entry_price",0),"sl":s.get("stop_loss",0),"tp1":s.get("tp1",0),
-           "rr1":s.get("rr1",0),"ai_rec":s.get("ai_recommendation",""),
-           "kelly_pct":s.get("kelly_risk_pct",0)} for s in state.active_signals]
+    sigs = [{"symbol":s.get("symbol",""),"name":s.get("name",""),"emoji":s.get("emoji",""),
+             "direction":s.get("direction","none"),"score":s.get("score",0),"action":s.get("action",""),
+             "entry":s.get("entry_price",0),"sl":s.get("stop_loss",0),"tp1":s.get("tp1",0),
+             "rr1":s.get("rr1",0),"ai_rec":s.get("ai_recommendation",""),
+             "kelly_pct":s.get("kelly_risk_pct",0)} for s in state.active_signals]
     macro = state.macro_data
     return jsonify({"signals":sigs,"total":len(sigs),
                     "env":{"vix":macro.get("vix",{}).get("price",0),
@@ -675,117 +646,111 @@ def api_scan_summary():
                            "regime":state.regime.get("regime_zh","")},
                     "last_scan":state.last_scan_time})
 
-
 @app.route("/api/signal/<sig_id>/result", methods=["POST"])
 def api_signal_result(sig_id):
-    data=request.get_json() or {}; result=data.get("result",""); pnl=float(data.get("pnl",0))
+    data   = request.get_json() or {}
+    result = data.get("result",""); pnl = float(data.get("pnl",0))
     if result not in ["tp1","tp2","sl","expired"]:
         return jsonify({"error":"result 必須是 tp1/tp2/sl/expired"}),400
-    store.update_signal_result(sig_id,result,pnl)
+    store.update_signal_result(sig_id, result, pnl)
     with state._lock:
         for s in state.active_signals:
             if s.get("id")==sig_id: state.active_signals.remove(s); state.expired_signals.append(s); break
         for s in state.signal_log:
             if s.get("id")==sig_id:
-                symbol=s.get("symbol","")
+                symbol = s.get("symbol","")
                 if result=="sl": store.set_consec_loss(symbol,store.get_consec_loss(symbol)+1)
                 elif result in ["tp1","tp2"]: store.set_consec_loss(symbol,0)
                 break
     state.signal_log = store.load_signal_log(500)
     return jsonify({"ok":True,"id":sig_id,"result":result,"pnl":pnl})
 
-
 @app.route("/api/signal/<sig_id>/close", methods=["POST"])
 def api_signal_close(sig_id):
-    data=request.get_json() or {}; close_price=float(data.get("close_price",0))
-    target=None
+    data        = request.get_json() or {}
+    close_price = float(data.get("close_price",0))
+    target      = None
     with state._lock:
         for s in state.active_signals:
             if s.get("id")==sig_id: target=s; break
     if not target: return jsonify({"error":"訊號不存在或已到期"}),404
-    direction=target.get("direction","buy"); entry=target.get("entry_price",close_price)
-    pnl_pts=(close_price-entry) if direction=="buy" else (entry-close_price)
-    pnl_usd=round(pnl_pts*target.get("suggested_lot",0.01)*10000,2)
-    result_type="tp1" if pnl_usd>=0 else "sl"
-    store.update_signal_result(sig_id,result_type,pnl_usd)
-    with state._lock:
-        state.active_signals=[s for s in state.active_signals if s.get("id")!=sig_id]
-    state.signal_log=store.load_signal_log(500)
+    direction = target.get("direction","buy"); entry = target.get("entry_price",close_price)
+    pnl_pts   = (close_price-entry) if direction=="buy" else (entry-close_price)
+    pnl_usd   = round(pnl_pts*target.get("suggested_lot",0.01)*10000,2)
+    result_type = "tp1" if pnl_usd>=0 else "sl"
+    store.update_signal_result(sig_id, result_type, pnl_usd)
+    with state._lock: state.active_signals=[s for s in state.active_signals if s.get("id")!=sig_id]
+    state.signal_log = store.load_signal_log(500)
     return jsonify({"ok":True,"id":sig_id,"pnl_usd":pnl_usd,"result":result_type})
-
 
 @app.route("/api/trump")
 def api_trump(): return jsonify(state.trump_data or {"has_impact_posts":False,"posts":[]})
 
-
 @app.route("/api/briefing")
 def api_briefing(): return jsonify(state.daily_briefing or {"ai_available":False})
-
 
 @app.route("/api/briefing/generate", methods=["POST"])
 def api_briefing_generate():
     def _gen():
         try:
             from ai_analyst import generate_daily_briefing
-            b=generate_daily_briefing(state.macro_data,state.trump_data)
-            state.daily_briefing=b; state.last_briefing_date=datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            b = generate_daily_briefing(state.macro_data, state.trump_data)
+            state.daily_briefing     = b
+            state.last_briefing_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             from telegram_bot import format_briefing_message
-            safe_send(format_briefing_message(b),priority=4)
+            safe_send(format_briefing_message(b), priority=4)
         except Exception as e: logger.error(f"briefing generate: {e}")
-    threading.Thread(target=_gen,daemon=True).start()
+    threading.Thread(target=_gen, daemon=True).start()
     return jsonify({"ok":True,"message":"每日簡報重新生成中"})
-
 
 @app.route("/api/watchdog/status")
 def api_watchdog_status():
     import time as _t
-    elapsed=_t.time()-watchdog._last_ping
-    queue_sz=(len(getattr(__import__("watchdog"),"rate_limiter",object())._queue)
-              if hasattr(__import__("watchdog"),"rate_limiter") else 0)
+    elapsed  = _t.time()-watchdog._last_ping
+    queue_sz = (len(getattr(__import__("watchdog"),"rate_limiter",object())._queue)
+                if hasattr(__import__("watchdog"),"rate_limiter") else 0)
     return jsonify({"last_ping_ago_sec":round(elapsed),"last_ping_ago_min":round(elapsed/60,1),
                     "fail_count":watchdog._fail_count,
                     "status":"healthy" if elapsed<1800 else "warning" if elapsed<3600 else "dead",
                     "telegram_queue":queue_sz,"scan_count":state.scan_count,
                     "last_scan_time":state.last_scan_time})
 
-
 @app.route("/api/correlation")
 def api_correlation():
     from data_fetcher   import fetch_ohlcv
     from scoring_engine import calc_rolling_correlation
-    syms=["EURUSD","GBPUSD","USDJPY","XAUUSD","BTCUSD","US500","NAS100"]; prices={}
+    syms   = ["EURUSD","GBPUSD","USDJPY","XAUUSD","BTCUSD","US500","NAS100"]
+    prices = {}
     for sym in syms:
         try:
-            d=fetch_ohlcv(sym,"entry")
+            d = fetch_ohlcv(sym,"entry")
             if d and d.get("closes"): prices[sym]=d["closes"][-20:]
         except: pass
-    sl=list(prices.keys())
-    mat={s1:{s2:(1.0 if s1==s2 else calc_rolling_correlation(prices[s1],prices[s2],20))
-             for s2 in sl} for s1 in sl}
+    sl  = list(prices.keys())
+    mat = {s1:{s2:(1.0 if s1==s2 else calc_rolling_correlation(prices[s1],prices[s2],20))
+               for s2 in sl} for s1 in sl}
     return jsonify({"matrix":mat,"symbols":sl,
                     "high_corr":[[s1,s2,mat[s1][s2]] for s1 in sl for s2 in sl
                                  if s1<s2 and abs(mat[s1].get(s2,0))>=0.7]})
 
-
 @app.route("/api/kelly")
 def api_kelly():
     from config import ACCOUNT_BALANCE_USD
-    wr=float(request.args.get("win_rate",0)); rr=float(request.args.get("rr",0))
-    bal=float(request.args.get("balance",ACCOUNT_BALANCE_USD))
+    wr = float(request.args.get("win_rate",0)); rr = float(request.args.get("rr",0))
+    bal = float(request.args.get("balance",ACCOUNT_BALANCE_USD))
     if not wr or not rr:
-        stats=store.get_trade_stats(); wr=wr or stats.get("win_rate",50)/100; rr=rr or 1.6
-    else: wr/=100
-    result=kelly_position_size(wr,rr,bal)
+        stats = store.get_trade_stats(); wr = wr or stats.get("win_rate",50)/100; rr = rr or 1.6
+    else: wr /= 100
+    result = kelly_position_size(wr, rr, bal)
     return jsonify({**result,"win_rate_pct":round(wr*100,1),"rr":rr,"balance":bal})
-
 
 @app.route("/api/equity")
 def api_equity():
     from config import ACCOUNT_BALANCE_USD
-    curve=store.get_equity_curve(); trades=store.get_trade_list()
-    balance=ACCOUNT_BALANCE_USD; points=[{"balance":balance,"trade":None}]
+    curve  = store.get_equity_curve(); trades = store.get_trade_list()
+    balance= ACCOUNT_BALANCE_USD; points=[{"balance":balance,"trade":None}]
     for t in trades:
-        balance+=t.get("pnl",0)
+        balance += t.get("pnl",0)
         points.append({"balance":round(balance,2),"symbol":t.get("symbol",""),
                         "direction":t.get("direction",""),"result":t.get("result",""),
                         "pnl":t.get("pnl",0),"date":t.get("generated","")[:10]})
@@ -794,64 +759,48 @@ def api_equity():
                     "total_pnl":round(balance-ACCOUNT_BALANCE_USD,2),
                     "return_pct":round((balance-ACCOUNT_BALANCE_USD)/ACCOUNT_BALANCE_USD*100,2)})
 
-
 @app.route("/api/alert/test", methods=["POST"])
 def api_alert_test():
     from config import TELEGRAM_BOT_TOKEN
     if not TELEGRAM_BOT_TOKEN: return jsonify({"ok":False,"error":"TELEGRAM_BOT_TOKEN 未設定"}),400
-    safe_send(f"✅ <b>Telegram 測試訊息</b>\n\nMitrade AI v{state.version} 連接正常\n"
-              f"時間：{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",priority=1)
+    safe_send(f"✅ <b>Mitrade AI v{state.version} 連接正常</b>\n"
+              f"時間：{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", priority=1)
     return jsonify({"ok":True,"message":"測試訊息已發送"})
-
 
 @app.route("/api/scan/force", methods=["POST"])
 def api_scan_force():
     import time as _t
-    last=getattr(api_scan_force,"_last",0)
+    last = getattr(api_scan_force,"_last",0)
     if _t.time()-last<60: return jsonify({"ok":False,"error":"60秒內只能觸發一次"}),429
-    api_scan_force._last=_t.time()
-    threading.Thread(target=run_scan,daemon=True).start()
+    api_scan_force._last = _t.time()
+    threading.Thread(target=run_scan, daemon=True).start()
     return jsonify({"ok":True,"message":"掃描已觸發"})
-
-
-@app.route("/api/simulate/force", methods=["POST"])
-def api_simulate_force():
-    """★ 手動觸發自動模擬"""
-    def _run():
-        try: simulate_pending_signals()
-        except Exception as e: logger.error(f"simulate_force: {e}")
-    threading.Thread(target=_run,daemon=True).start()
-    pending_count = len([s for s in state.signal_log if s.get("result")=="pending"])
-    return jsonify({"ok":True,"message":f"模擬觸發，共 {pending_count} 筆 pending 訊號"})
-
 
 @app.route("/api/settings", methods=["GET","POST"])
 def api_settings():
     from config import SIGNAL_THRESHOLDS, CIRCUIT_BREAKER, SYSTEM
-    if request.method=="GET":
+    if request.method == "GET":
         return jsonify({"min_score":SIGNAL_THRESHOLDS["min_score"],"min_rr":SIGNAL_THRESHOLDS["min_rr"],
                         "risk_per_trade_pct":CIRCUIT_BREAKER["risk_per_trade_pct"],
                         "max_lot":CIRCUIT_BREAKER["max_lot"],"scan_interval_min":SYSTEM["scan_interval_min"],
                         "vix_extreme":CIRCUIT_BREAKER["vix_extreme"],"vix_threshold":CIRCUIT_BREAKER["vix_threshold"]})
     data=request.get_json() or {}; changed=[]
-    if "min_score"          in data: from config import SIGNAL_THRESHOLDS as ST; ST["min_score"]=float(data["min_score"]); changed.append(f"min_score={data['min_score']}")
-    if "min_rr"             in data: from config import SIGNAL_THRESHOLDS as ST; ST["min_rr"]=float(data["min_rr"]); changed.append(f"min_rr={data['min_rr']}")
-    if "risk_per_trade_pct" in data: CIRCUIT_BREAKER["risk_per_trade_pct"]=float(data["risk_per_trade_pct"]); changed.append(f"risk={data['risk_per_trade_pct']}")
-    if "max_lot"            in data: CIRCUIT_BREAKER["max_lot"]=float(data["max_lot"]); changed.append(f"max_lot={data['max_lot']}")
-    if "vix_threshold"      in data: CIRCUIT_BREAKER["vix_threshold"]=float(data["vix_threshold"]); changed.append(f"vix_th={data['vix_threshold']}")
+    if "min_score"         in data: SIGNAL_THRESHOLDS["min_score"]        =float(data["min_score"]);         changed.append(f"min_score={data['min_score']}")
+    if "min_rr"            in data: SIGNAL_THRESHOLDS["min_rr"]           =float(data["min_rr"]);            changed.append(f"min_rr={data['min_rr']}")
+    if "risk_per_trade_pct"in data: CIRCUIT_BREAKER["risk_per_trade_pct"] =float(data["risk_per_trade_pct"]);changed.append(f"risk_per_trade_pct={data['risk_per_trade_pct']}")
+    if "max_lot"           in data: CIRCUIT_BREAKER["max_lot"]            =float(data["max_lot"]);           changed.append(f"max_lot={data['max_lot']}")
+    if "vix_threshold"     in data: CIRCUIT_BREAKER["vix_threshold"]      =float(data["vix_threshold"]);     changed.append(f"vix_threshold={data['vix_threshold']}")
     store.set_meta("settings_override",data)
-    if changed: safe_send(f"⚙️ 系統設定已更新：{', '.join(changed)}",priority=3)
+    if changed: safe_send(f"⚙️ 系統設定已更新：{', '.join(changed)}", priority=3)
     return jsonify({"ok":True,"changed":changed})
-
 
 @app.route("/api/news/<symbol>")
 def api_news(symbol):
     try:
         from data_fetcher import fetch_company_news
-        news=fetch_company_news(symbol.upper(),days_back=3)
+        news = fetch_company_news(symbol.upper(), days_back=3)
         return jsonify({"symbol":symbol.upper(),"news":news,"count":len(news)})
     except Exception as e: return jsonify({"symbol":symbol.upper(),"news":[],"error":str(e)}),500
-
 
 @app.route("/health")
 def health(): return "OK",200
@@ -861,15 +810,15 @@ def health(): return "OK",200
 # ═══════════════════════════════════════
 def start_scheduler():
     try:
-        s=BackgroundScheduler(timezone="UTC")
-        s.add_job(run_scan,         "interval",minutes=SYSTEM["scan_interval_min"],
-                  id="scan",     misfire_grace_time=60, max_instances=1,coalesce=True)
-        s.add_job(check_trump,      "interval",minutes=SYSTEM["trump_check_min"],
-                  id="trump",    misfire_grace_time=60, max_instances=1,coalesce=True)
-        s.add_job(morning_briefing, "cron",    hour=0,minute=30,
+        s = BackgroundScheduler(timezone="UTC")
+        s.add_job(run_scan,         "interval", minutes=SYSTEM["scan_interval_min"],
+                  id="scan",     misfire_grace_time=30, max_instances=1, coalesce=True)
+        s.add_job(check_trump,      "interval", minutes=SYSTEM["trump_check_min"],
+                  id="trump",    misfire_grace_time=60, max_instances=1, coalesce=True)
+        s.add_job(morning_briefing, "cron",     hour=0, minute=30,
                   id="briefing", misfire_grace_time=300,max_instances=1)
-        s.add_job(poll_commands,    "interval",seconds=10,
-                  id="commands", misfire_grace_time=15, max_instances=1,coalesce=True)
+        s.add_job(poll_commands,    "interval", seconds=10,
+                  id="commands", misfire_grace_time=15, max_instances=1, coalesce=True)
         s.start()
         logger.info("✅ 排程器啟動")
 
@@ -883,12 +832,13 @@ def start_scheduler():
             except Exception as e: logger.error(f"初始宏觀: {e}")
             time.sleep(10)
             safe_send(
-                f"🚀 <b>Mitrade AI v{state.version} 已啟動</b>\n\n"
-                f"監控品種：外匯 / 商品 / 加密 / 指數\n"
-                f"市場機制：{state.regime.get('regime_zh','初始化中')}\n"
+                f"🚀 <b>Mitrade AI v{state.version} 已啟動（超短線模式）</b>\n\n"
+                f"品種：外匯（GBP/USD、EUR/USD 等）+ 黃金\n"
+                f"時框：5M / 15M / 1H\n"
                 f"掃描頻率：每 {SYSTEM['scan_interval_min']} 分鐘\n"
-                f"績效模擬：自動（每次掃描後執行）\n"
-                f"時段：{state.market_session.get('session_zh','—')}\n\n輸入 /help 查看指令",
+                f"訊號有效期：1 小時\n"
+                f"時段：{state.market_session.get('session_zh','—')}\n\n"
+                f"輸入 /help 查看指令",
                 priority=5)
             time.sleep(20)
             try:   check_trump()
@@ -903,11 +853,12 @@ def start_scheduler():
             except Exception as e: logger.error(f"初始掃描: {e}")
 
         threading.Thread(target=_startup, daemon=True).start()
+
     except Exception as e:
         logger.error(f"排程器錯誤: {e}")
 
 
 start_scheduler()
 
-if __name__=="__main__":
-    app.run(host="0.0.0.0",port=SYSTEM["web_port"],debug=False)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=SYSTEM["web_port"], debug=False)
