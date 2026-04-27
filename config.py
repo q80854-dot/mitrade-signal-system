@@ -1,4 +1,12 @@
-""" config.py v5.2 — 修正版（移除美股、更新備用數據） """
+"""
+config.py v5.3 — 超短線版本
+修正：
+  ★ TIMEFRAMES 改為 1H/15M/5M（適合數分鐘到1小時短線）
+  ★ INDICATOR_PARAMS EMA 改為短週期（5/13/21）
+  ★ signal_expire_h 從 4 小時改為 1 小時
+  ★ 移除所有美股
+  ★ risk_manager 的美股類別建議移除
+"""
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -11,13 +19,12 @@ TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "8091656090")
 ACCOUNT_BALANCE_USD = float(os.getenv("ACCOUNT_BALANCE_USD", "3000"))
 
-MAX_RISK_PER_TRADE      = 0.03
-MAX_DAILY_RISK          = 0.06
+MAX_RISK_PER_TRADE      = 0.02   # 單筆最大風險 2%
+MAX_DAILY_RISK          = 0.06   # 單日最大風險 6%
 MAX_SIMULTANEOUS_TRADES = 3
 MIN_ACCOUNT_FOR_INDEX   = 1500
 MIN_ACCOUNT_FOR_STOCK   = 500
 
-# ★ 移除美股品種，只保留外匯/商品/加密/指數
 OVERNIGHT_SWAP = {
     "EURUSD": {"buy":-2.50,"sell": 1.80},
     "GBPUSD": {"buy":-3.20,"sell": 2.10},
@@ -36,31 +43,33 @@ OVERNIGHT_SWAP = {
 }
 
 TYPICAL_SPREAD = {
-    "EURUSD":0.0002,"GBPUSD":0.0003,"USDJPY":0.03,"AUDUSD":0.0003,"USDCAD":0.0003,
-    "XAUUSD":0.30,"WTI":0.05,"BTCUSD":30.0,"ETHUSD":2.0,
+    "EURUSD":0.0002,"GBPUSD":0.0003,"USDJPY":0.03,
+    "AUDUSD":0.0003,"USDCAD":0.0003,
+    "XAUUSD":0.30,"WTI":0.05,
+    "BTCUSD":30.0,"ETHUSD":2.0,
     "US500":0.5,"NAS100":1.5,"US30":5.0,"HK50":5.0,"GER40":1.5,
 }
 
-# ★ SYMBOLS：移除全部美股，只保留外匯/商品/加密/指數
+# 只保留外匯/商品/加密/指數，無美股
 SYMBOLS = {
-    # 外匯
-    "EURUSD": {"yahoo":"EURUSD=X","av":"EUR","name":"EUR/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","ECB","CPI","非農"]},
-    "GBPUSD": {"yahoo":"GBPUSD=X","av":"GBP","name":"GBP/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","BOE","英國CPI"]},
-    "USDJPY": {"yahoo":"JPY=X",   "av":"JPY","name":"USD/JPY","cat":"外匯","pip":0.01,  "atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["Fed","BOJ","日本干預"]},
-    "AUDUSD": {"yahoo":"AUDUSD=X","av":"AUD","name":"AUD/USD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["中國PMI","鐵礦石"]},
-    "USDCAD": {"yahoo":"CAD=X",   "av":"CAD","name":"USD/CAD","cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["原油","BOC"]},
+    # 外匯（主要品種優先）
+    "EURUSD": {"yahoo":"EURUSD=X","av":"EUR","name":"EUR/USD",    "cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","ECB"]},
+    "GBPUSD": {"yahoo":"GBPUSD=X","av":"GBP","name":"GBP/USD",   "cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["DXY","BOE"]},
+    "USDJPY": {"yahoo":"JPY=X",   "av":"JPY","name":"USD/JPY",   "cat":"外匯","pip":0.01,  "atr_mult":1.5,"priority":1,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["Fed","BOJ"]},
+    "AUDUSD": {"yahoo":"AUDUSD=X","av":"AUD","name":"AUD/USD",   "cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["中國PMI"]},
+    "USDCAD": {"yahoo":"CAD=X",   "av":"CAD","name":"USD/CAD",   "cat":"外匯","pip":0.0001,"atr_mult":1.5,"priority":2,"emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["原油","BOC"]},
     # 商品
-    "XAUUSD": {"yahoo":"GC=F","av":"XAU","name":"黃金 XAU/USD","cat":"商品","pip":0.1,"atr_mult":2.0,"priority":1,"emoji":"🥇","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","VIX","川普"]},
-    "WTI":    {"yahoo":"CL=F","av":"WTI","name":"WTI 原油",    "cat":"商品","pip":0.01,"atr_mult":2.0,"priority":2,"emoji":"🛢️","min_lot":0.01,"min_account":0,"special_conditions":True,"drivers":["EIA","OPEC","中東"]},
-    # 加密
-    "BTCUSD": {"yahoo":"BTC-USD","av":"BTC","name":"Bitcoin BTC/USD",    "cat":"加密","pip":1.0,"atr_mult":2.5,"priority":1,"emoji":"₿", "min_lot":0.01,"min_account":0,"drivers":["恐懼貪婪","川普"]},
-    "ETHUSD": {"yahoo":"ETH-USD","av":"ETH","name":"Ethereum ETH/USD","cat":"加密","pip":0.1,"atr_mult":2.5,"priority":2,"emoji":"⟠","min_lot":0.01,"min_account":0,"drivers":["BTC走勢"]},
+    "XAUUSD": {"yahoo":"GC=F","av":"XAU","name":"黃金 XAU/USD",  "cat":"商品","pip":0.1,  "atr_mult":2.0,"priority":1,"emoji":"🥇","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","VIX"]},
+    "WTI":    {"yahoo":"CL=F","av":"WTI","name":"WTI 原油",       "cat":"商品","pip":0.01, "atr_mult":2.0,"priority":2,"emoji":"🛢️","min_lot":0.01,"min_account":0,"special_conditions":True,"drivers":["EIA","OPEC"]},
+    # 加密（24/7）
+    "BTCUSD": {"yahoo":"BTC-USD","av":"BTC","name":"Bitcoin BTC/USD",    "cat":"加密","pip":1.0,"atr_mult":2.5,"priority":1,"emoji":"₿", "min_lot":0.01,"min_account":0,"drivers":["F&G","川普"]},
+    "ETHUSD": {"yahoo":"ETH-USD","av":"ETH","name":"Ethereum ETH/USD",   "cat":"加密","pip":0.1,"atr_mult":2.5,"priority":2,"emoji":"⟠","min_lot":0.01,"min_account":0,"drivers":["BTC走勢"]},
     # 指數
-    "US500":  {"yahoo":"^GSPC","av":"SPY","name":"S&P 500",      "cat":"指數","pip":0.1,"atr_mult":2.0,"priority":2,"emoji":"📈","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["Fed","財報季","VIX"]},
-    "NAS100": {"yahoo":"^NDX","av":"QQQ","name":"納斯達克 100","cat":"指數","pip":0.1,"atr_mult":2.5,"priority":2,"emoji":"💻","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["科技股財報","Fed"]},
-    "US30":   {"yahoo":"^DJI","av":"DIA","name":"道瓊工業",      "cat":"指數","pip":1.0,"atr_mult":2.0,"priority":2,"emoji":"🏭","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["工業股財報","Fed"]},
-    "HK50":   {"yahoo":"^HSI","av":"EWH","name":"恒生指數",      "cat":"指數","pip":1.0,"atr_mult":2.0,"priority":3,"emoji":"🇭🇰","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["中國政策","人民幣"]},
-    "GER40":  {"yahoo":"^GDAXI","av":"EWG","name":"德國 DAX 40","cat":"指數","pip":0.1,"atr_mult":2.0,"priority":3,"emoji":"🇩🇪","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["ECB","歐元區PMI"]},
+    "US500":  {"yahoo":"^GSPC","av":"SPY","name":"S&P 500",       "cat":"指數","pip":0.1, "atr_mult":2.0,"priority":2,"emoji":"📈","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["Fed","VIX"]},
+    "NAS100": {"yahoo":"^NDX","av":"QQQ","name":"納斯達克 100",   "cat":"指數","pip":0.1, "atr_mult":2.5,"priority":2,"emoji":"💻","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["科技財報","Fed"]},
+    "US30":   {"yahoo":"^DJI","av":"DIA","name":"道瓊工業",       "cat":"指數","pip":1.0, "atr_mult":2.0,"priority":3,"emoji":"🏭","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["工業財報"]},
+    "HK50":   {"yahoo":"^HSI","av":"EWH","name":"恒生指數",       "cat":"指數","pip":1.0, "atr_mult":2.0,"priority":3,"emoji":"🇭🇰","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["中國政策"]},
+    "GER40":  {"yahoo":"^GDAXI","av":"EWG","name":"德國 DAX 40", "cat":"指數","pip":0.1, "atr_mult":2.0,"priority":3,"emoji":"🇩🇪","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["ECB"]},
 }
 
 SECTOR_ETFS = {
@@ -69,58 +78,93 @@ SECTOR_ETFS = {
 }
 
 US_FUTURES = {
-    "ES=F":"S&P500期貨","NQ=F":"納斯達克期貨","YM=F":"道瓊期貨","GC=F":"黃金期貨","CL=F":"原油期貨",
+    "ES=F":"S&P500期貨","NQ=F":"納斯達克期貨","YM=F":"道瓊期貨",
+    "GC=F":"黃金期貨","CL=F":"原油期貨",
 }
 
+# ★ 超短線指標參數（短週期）
 INDICATOR_PARAMS = {
-    "ema_fast":9,"ema_mid":21,"ema_slow":50,"ema_trend":200,
-    "rsi_period":14,"rsi_overbought":70,"rsi_oversold":30,
-    "rsi_bull_zone":45,"rsi_bear_zone":55,
-    "macd_fast":12,"macd_slow":26,"macd_signal":9,
-    "bb_period":20,"bb_std":2,"atr_period":14,"vol_period":20,
-    "adx_period":14,
-    "support_lookback":50,
-    "fib_levels":[0.236,0.382,0.5,0.618,0.786],
+    # EMA：改為短週期，適合數分鐘到1小時
+    "ema_fast":  5,    # 原本 9 → 5
+    "ema_mid":   13,   # 原本 21 → 13
+    "ema_slow":  21,   # 原本 50 → 21
+    "ema_trend": 50,   # 原本 200 → 50（超短線用 50 當趨勢線）
+
+    # RSI
+    "rsi_period":       9,   # 原本 14 → 9（更敏感）
+    "rsi_overbought":  70,
+    "rsi_oversold":    30,
+    "rsi_bull_zone":   45,
+    "rsi_bear_zone":   55,
+
+    # MACD：短週期版
+    "macd_fast":    5,   # 原本 12 → 5
+    "macd_slow":   13,   # 原本 26 → 13
+    "macd_signal":  4,   # 原本 9 → 4
+
+    # 其他
+    "bb_period":   15,   # 原本 20 → 15
+    "bb_std":       2,
+    "atr_period":  10,   # 原本 14 → 10
+    "vol_period":  10,   # 原本 20 → 10
+    "adx_period":  10,   # 原本 14 → 10
+
+    "support_lookback": 30,  # 原本 50 → 30（超短線只看近期）
+    "fib_levels": [0.236, 0.382, 0.5, 0.618, 0.786],
 }
 IND = INDICATOR_PARAMS
 
+# ★ 超短線時框設定（原本：日線/4H/1H → 改為：1H/15M/5M）
 TIMEFRAMES = {
-    "trend":{"interval":"1d","period":"6mo","bars":120,"label":"日線"},
-    "mid":  {"interval":"4h","period":"60d","bars":120,"label":"4小時"},
-    "entry":{"interval":"1h","period":"30d","bars":120,"label":"1小時"},
+    "trend": {"interval":"1h",  "period":"7d",  "bars":100, "label":"1小時"},   # 趨勢確認
+    "mid":   {"interval":"15m", "period":"3d",  "bars":100, "label":"15分鐘"},  # 方向確認
+    "entry": {"interval":"5m",  "period":"1d",  "bars":100, "label":"5分鐘"},   # 進場時機
 }
 
 CIRCUIT_BREAKER = {
-    "vix_extreme":40,"vix_high":30,"vix_threshold":30,
-    "price_spike":3.0,"price_spike_pct":3.0,
-    "signal_expire_h":4,"signal_expire_hours":4,
-    "eia_pause_min":120,"eia_pause_minutes":120,
-    "news_pause_minutes":30,"earnings_pause_days":2,
-    "weekend_gap_warning":True,"max_daily_signals":10,
+    "vix_extreme":       40,
+    "vix_high":          30,
+    "vix_threshold":     30,
+    "price_spike":       3.0,
+    "price_spike_pct":   3.0,
+    "signal_expire_h":   1,    # ★ 從 4 改為 1 小時（超短線訊號1小時過期）
+    "signal_expire_hours":1,
+    "eia_pause_min":     60,   # EIA 前後各暫停 60 分鐘
+    "eia_pause_minutes": 60,
+    "news_pause_minutes":15,   # 重大新聞後暫停 15 分鐘
+    "earnings_pause_days":2,
+    "weekend_gap_warning":True,
+    "max_daily_signals": 10,
     "risk_per_trade_pct":2.0,
-    "max_lot":2.0,
+    "max_lot":           2.0,
 }
 CB = CIRCUIT_BREAKER
 
 SIGNAL_THRESHOLDS = {
-    "min_score":65,"high_conf":80,"high_confidence":80,
-    "min_rr":1.3,"min_rr_ratio":1.3,
+    "min_score":      65,
+    "high_conf":      80,
+    "high_confidence":80,
+    "min_rr":         1.3,
+    "min_rr_ratio":   1.3,
 }
 THRESH = SIGNAL_THRESHOLDS
 
-# ★ 移除美股相關品種群組
 CORRELATION_GROUPS = [
-    ["EURUSD","GBPUSD","AUDUSD"],
-    ["XAUUSD","EURUSD"],
-    ["WTI","USDCAD"],
-    ["BTCUSD","ETHUSD"],
-    ["US500","NAS100","US30"],
+    ["EURUSD", "GBPUSD", "AUDUSD"],
+    ["XAUUSD", "EURUSD"],
+    ["WTI",    "USDCAD"],
+    ["BTCUSD", "ETHUSD"],
+    ["US500",  "NAS100", "US30"],
 ]
 
 SYSTEM = {
-    "scan_interval_min":15,"scan_interval_minutes":15,
-    "trump_check_min":30,"web_port":5000,
-    "version":"5.2.0","name":"Mitrade AI Signal System","timezone":"Asia/Taipei",
+    "scan_interval_min":     5,   # ★ 從 15 改為 5 分鐘掃描一次（超短線）
+    "scan_interval_minutes": 5,
+    "trump_check_min":       30,
+    "web_port":              5000,
+    "version":               "5.3.0",
+    "name":                  "Mitrade AI Signal System",
+    "timezone":              "Asia/Taipei",
 }
 
 DISCLAIMER = (
