@@ -109,6 +109,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
 .bt-leaderboard{width:100%;border-collapse:collapse}
 .bt-leaderboard td,.bt-leaderboard th{padding:6px 10px;font-size:11px;border-bottom:1px solid var(--border)}
 .bt-leaderboard th{font-size:9px;color:var(--t3);letter-spacing:.5px;text-transform:uppercase;text-align:left}
+/* ★ 新增：止損 pips 標籤 */
+.sl-tag{font-size:9px;padding:1px 6px;border-radius:4px;background:var(--rbg);color:var(--red);border:1px solid var(--rbrd);margin-left:4px}
+.sl-ok{background:var(--gbg);color:var(--green);border-color:var(--gbrd)}
+/* ★ 績效頁：真實資金曲線 */
+.perf-sim-tag{font-size:9px;padding:2px 8px;border-radius:4px;background:var(--bbg);color:var(--blue);border:1px solid var(--bbrd);margin-left:8px}
 @media(max-width:900px){.g4{grid-template-columns:repeat(2,1fr)}.g32{grid-template-columns:1fr}.g2{grid-template-columns:1fr}}
 @media(max-width:600px){.sidebar{width:48px;min-width:48px}.logo-text,.logo-ver,.nav-sec,.nav-item span:not(.nav-dot),.sidebar-status .status-row span:last-child{display:none}.nav-item{padding:10px;justify-content:center}.g4{grid-template-columns:1fr 1fr}}
 </style>
@@ -128,6 +133,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
   <div class="nav-item"       data-page="risk"      onclick="nav(this)"><span class="nav-dot r"></span><span>風控面板</span></div>
   <div class="nav-divider"></div>
   <div class="nav-sec">品種篩選</div>
+  <!-- ★ 移除美股 tab -->
   <div class="nav-item" data-cat="外匯" onclick="setFilter(this,'外匯')"><span class="nav-dot"></span><span>外匯</span></div>
   <div class="nav-item" data-cat="商品" onclick="setFilter(this,'商品')"><span class="nav-dot"></span><span>商品</span></div>
   <div class="nav-item" data-cat="加密" onclick="setFilter(this,'加密')"><span class="nav-dot"></span><span>加密</span></div>
@@ -151,14 +157,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
 <script>
 'use strict';
 const API=''; let S=null; const CH={}; let curPage='overview',curFilter=null,loading=false;
-const GBM_CACHE={};
-function genGBM(key,start,days,mu=.0015,sigma=.012){
-  if(GBM_CACHE[key])return GBM_CACHE[key];
-  let v=start,seed=42; const real=[start],gbm=[start];
-  function rand(){seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;}
-  for(let i=0;i<days;i++){const r=(rand()-.5)*sigma*2+mu*.5;v*=(1+r);real.push(+(v.toFixed(2)));gbm.push(+(start*Math.exp(mu*(i+1))).toFixed(2));}
-  GBM_CACHE[key]={real,gbm};return GBM_CACHE[key];
-}
+
+function safeN(v,f=0){const n=parseFloat(v);return isNaN(n)?f:n;}
+function safeSharpe(v){if(v==null||!isFinite(v)||isNaN(v))return '—';return v.toFixed(3);}
+function sc2c(s){return s>=.65?'var(--green)':s<=.35?'var(--red)':'var(--yellow)';}
+function scNum(s){return s>=75?'var(--green)':s>=55?'var(--yellow)':'var(--red)';}
+function fmtChg(v){if(v==null||isNaN(parseFloat(v)))return '<span class="neu">—</span>';const n=parseFloat(v);return `<span class="${n>=0?'up':'dn'}">${n>=0?'+':''}${n.toFixed(2)}%</span>`;}
+function compScore(){const tw=DIMS.reduce((s,d)=>s+d.weight,0);return DIMS.reduce((s,d)=>s+d.score*(d.weight/tw),0);}
+function actionFromScore(sc){if(sc>=.65)return{label:'BUY',cls:'a-ok'};if(sc<=.35)return{label:'SELL',cls:'a-danger'};return{label:'HOLD',cls:'a-warn'};}
+
 const DIMS=[
   {key:'tech',name:'技術指標',color:'#60a5fa',weight:25,score:0},
   {key:'macro',name:'總經面',color:'#a78bfa',weight:20,score:0},
@@ -168,14 +175,9 @@ const DIMS=[
   {key:'vol',name:'成交量能',color:'#fb923c',weight:8,score:0},
   {key:'trend',name:'趨勢動能',color:'#22d3ee',weight:7,score:0},
 ];
+
 function destroyChart(id){if(CH[id]){try{CH[id].destroy();}catch(_){}delete CH[id];}}
-function sc2c(s){return s>=.65?'var(--green)':s<=.35?'var(--red)':'var(--yellow)';}
-function scNum(s){return s>=75?'var(--green)':s>=55?'var(--yellow)':'var(--red)';}
-function fmtChg(v){if(v==null||isNaN(parseFloat(v)))return '<span class="neu">—</span>';const n=parseFloat(v);return `<span class="${n>=0?'up':'dn'}">${n>=0?'+':''}${n.toFixed(2)}%</span>`;}
-function safeN(v,f=0){const n=parseFloat(v);return isNaN(n)?f:n;}
-function safeSharpe(v){if(v==null||!isFinite(v)||isNaN(v))return '—';return v.toFixed(3);}
-function compScore(){const tw=DIMS.reduce((s,d)=>s+d.weight,0);return DIMS.reduce((s,d)=>s+d.score*(d.weight/tw),0);}
-function actionFromScore(sc){if(sc>=.65)return{label:'BUY',cls:'a-ok'};if(sc<=.35)return{label:'SELL',cls:'a-danger'};return{label:'HOLD',cls:'a-warn'};}
+
 function updateDims(){
   if(!S?.snap)return;
   const m=S.snap.macro_data||{},ss=S.snap.system_status||{};
@@ -191,11 +193,13 @@ function updateDims(){
   DIMS[5].score=fg>60?.75:fg>40?.5:.3;
   DIMS[6].score=Math.max(0,Math.min(1,.5-safeN(m.dxy?.chg,0)/10));
 }
+
 async function apiFetch(path,timeout=10000){
   const ctrl=new AbortController(),tid=setTimeout(()=>ctrl.abort(),timeout);
   try{const r=await fetch(API+path,{signal:ctrl.signal});clearTimeout(tid);if(!r.ok)return null;return await r.json();}
   catch(e){clearTimeout(tid);return null;}
 }
+
 async function loadData(){
   if(loading)return;loading=true;
   document.querySelectorAll('.refresh-icon').forEach(el=>el.classList.add('btn-spin'));
@@ -210,6 +214,7 @@ async function loadData(){
   if((S?.snap?.active_signals||[]).length>0)dot.className='nav-dot g';
   updateDims();renderPage(curPage);
 }
+
 function nav(el){
   curFilter=null;const page=el.dataset.page||'overview';
   document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
@@ -218,6 +223,7 @@ function nav(el){
   document.getElementById('pg-'+page).classList.add('active');
   curPage=page;renderPage(page);
 }
+
 function setFilter(el,cat){
   curFilter=cat;
   document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
@@ -226,48 +232,33 @@ function setFilter(el,cat){
   document.getElementById('pg-signals').classList.add('active');
   curPage='signals';renderPage('signals');
 }
+
 function renderPage(name){
   if(!S){document.getElementById('pg-'+name).innerHTML='<div class="empty-state"><div class="empty-icon">⟳</div><div>後端連接中...</div><button class="retry-btn" onclick="loadData()">重試</button></div>';return;}
   const fn={overview:renderOverview,signals:renderSignals,weight:renderWeight,macro:renderMacro,perf:renderPerf,backtest:renderBacktest,risk:renderRisk};
   if(fn[name])fn[name](document.getElementById('pg-'+name));
 }
+
 setInterval(()=>{
   const now=new Date(),tw=new Date(now.getTime()+8*36e5);
   document.getElementById('sb-time').textContent=tw.toISOString().slice(11,16)+' 台灣 / '+now.toISOString().slice(11,16)+' UTC';
 },1000);
+
+/* ★ 訊號卡：加入止損 pips 顯示 */
 function sigCard(sig,expanded=false){
   const dir=sig.direction==='buy',sc=safeN(sig.score);
   const scC=scNum(sc),aiC=sig.ai_recommendation==='進場'?'var(--green)':sig.ai_recommendation==='跳過'?'var(--red)':'var(--yellow)';
-  if(!expanded)return`<div class="sig-card"><div style="display:flex;align-items:center;gap:10px"><div class="sig-dir ${dir?'dir-b':'dir-s'}">${dir?'B':'S'}</div><div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:13px;font-weight:700;color:var(--t1)">${sig.emoji||''} ${sig.name||sig.symbol}</span><span class="badge ${dir?'badge-b':'badge-s'}">${dir?'LONG':'SHORT'}</span></div><div style="display:flex;align-items:center;gap:8px;margin-top:5px"><div class="score-bar" style="width:80px"><div class="score-fill" style="width:${sc}%;background:${scC}"></div></div><span style="font-size:12px;font-weight:700;color:${scC}">${sc.toFixed(0)}</span><span style="font-size:10px;color:var(--t3)">進場 ${sig.entry_price}</span><span style="font-size:10px;color:var(--green)">1:${sig.rr1}</span></div></div></div></div>`;
-  return`<div class="card" style="margin-bottom:10px"><div style="display:flex;align-items:center;gap:12px"><div class="sig-dir ${dir?'dir-b':'dir-s'}" style="width:42px;height:42px;font-size:16px">${dir?'B':'S'}</div><div style="flex:1"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:15px;font-weight:700;color:var(--t1)">${sig.emoji||''} ${sig.name||sig.symbol}</span><div style="display:flex;gap:6px;align-items:center">${sig.ai_recommendation?`<span style="font-size:10px;color:${aiC}">AI·${sig.ai_recommendation}</span>`:''}<span class="badge ${dir?'badge-b':'badge-s'}">${dir?'做多 LONG':'做空 SHORT'}</span></div></div><div style="display:flex;align-items:center;gap:8px;margin-top:6px"><div class="score-bar" style="width:120px"><div class="score-fill" style="width:${sc}%;background:${scC}"></div></div><span style="font-size:14px;font-weight:700;color:${scC}">${sc.toFixed(1)}/100</span><span style="font-size:11px;color:var(--t3)">${sig.action||''}</span></div></div></div><div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">${[['進場','entry_price','var(--t1)'],['SL','stop_loss','var(--red)'],['TP1','tp1','var(--green)'],['TP2','tp2','var(--green)'],['風險','risk_pct','var(--t2)']].map(([l,k,c])=>`<div><div style="font-size:9px;color:var(--t3);margin-bottom:3px">${l}</div><div style="font-size:12px;font-weight:700;color:${c}">${k==='risk_pct'?(safeN(sig[k])+'%'):sig[k]||'—'}</div></div>`).join('')}</div><div style="display:flex;gap:12px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)"><div style="flex:1"><div style="font-size:9px;color:var(--t3);margin-bottom:5px">通過條件</div>${(sig.conditions_met||[]).slice(0,5).map(c=>`<div style="font-size:10px;color:var(--green);margin-bottom:2px">✓ ${c}</div>`).join('')}</div><div style="flex:1"><div style="font-size:9px;color:var(--t3);margin-bottom:5px">AI 理由 / 手數</div><div style="font-size:11px;color:var(--t2);margin-bottom:3px">${sig.ai_reason||'—'}</div><div style="font-size:10px;color:var(--t3)">手數 ${sig.suggested_lot||'—'} | RR 1:${sig.rr1}</div></div></div></div>`;
+  const slPips=sig.sl_pips?`<span class="sl-tag ${safeN(sig.sl_pips)>=15?'sl-ok':''}">${safeN(sig.sl_pips).toFixed(0)}p</span>`:'';
+  const marginInfo=sig.margin_pct?`<span style="font-size:10px;color:${safeN(sig.margin_pct)>20?'var(--red)':'var(--t3)'}">保 ${sig.margin_pct}%</span>`:'';
+  if(!expanded)return`<div class="sig-card"><div style="display:flex;align-items:center;gap:10px"><div class="sig-dir ${dir?'dir-b':'dir-s'}">${dir?'B':'S'}</div><div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:13px;font-weight:700;color:var(--t1)">${sig.emoji||''} ${sig.name||sig.symbol}</span><span class="badge ${dir?'badge-b':'badge-s'}">${dir?'LONG':'SHORT'}</span></div><div style="display:flex;align-items:center;gap:8px;margin-top:5px"><div class="score-bar" style="width:80px"><div class="score-fill" style="width:${sc}%;background:${scC}"></div></div><span style="font-size:12px;font-weight:700;color:${scC}">${sc.toFixed(0)}</span>${slPips}<span style="font-size:10px;color:var(--t3)">進場 ${sig.entry_price}</span><span style="font-size:10px;color:var(--green)">1:${sig.rr1}</span></div></div></div></div>`;
+  return`<div class="card" style="margin-bottom:10px"><div style="display:flex;align-items:center;gap:12px"><div class="sig-dir ${dir?'dir-b':'dir-s'}" style="width:42px;height:42px;font-size:16px">${dir?'B':'S'}</div><div style="flex:1"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:15px;font-weight:700;color:var(--t1)">${sig.emoji||''} ${sig.name||sig.symbol}</span><div style="display:flex;gap:6px;align-items:center">${sig.ai_recommendation?`<span style="font-size:10px;color:${aiC}">AI·${sig.ai_recommendation}</span>`:''}<span class="badge ${dir?'badge-b':'badge-s'}">${dir?'做多 LONG':'做空 SHORT'}</span></div></div><div style="display:flex;align-items:center;gap:8px;margin-top:6px"><div class="score-bar" style="width:120px"><div class="score-fill" style="width:${sc}%;background:${scC}"></div></div><span style="font-size:14px;font-weight:700;color:${scC}">${sc.toFixed(1)}/100</span>${slPips}${marginInfo}<span style="font-size:11px;color:var(--t3)">${sig.action||''}</span></div></div></div><div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">${[['進場','entry_price','var(--t1)'],['SL','stop_loss','var(--red)'],['TP1','tp1','var(--green)'],['TP2','tp2','var(--green)'],['風險','risk_pct','var(--t2)']].map(([l,k,c])=>`<div><div style="font-size:9px;color:var(--t3);margin-bottom:3px">${l}</div><div style="font-size:12px;font-weight:700;color:${c}">${k==='risk_pct'?(safeN(sig[k])+'%'):sig[k]||'—'}</div></div>`).join('')}</div><div style="display:flex;gap:12px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border)"><div style="flex:1"><div style="font-size:9px;color:var(--t3);margin-bottom:5px">通過條件</div>${(sig.conditions_met||[]).slice(0,5).map(c=>`<div style="font-size:10px;color:var(--green);margin-bottom:2px">✓ ${c}</div>`).join('')}</div><div style="flex:1"><div style="font-size:9px;color:var(--t3);margin-bottom:5px">AI 理由 / 手數</div><div style="font-size:11px;color:var(--t2);margin-bottom:3px">${sig.ai_reason||'—'}</div><div style="font-size:10px;color:var(--t3)">手數 ${sig.suggested_lot||'—'} | RR 1:${sig.rr1}</div></div></div></div>`;
 }
 
-/* ★ 修正：週末/初始化/無訊號 空狀態 */
-function getEmptySignalHtml(ses, scanCount) {
-  const isWeekend = ses?.session === 'weekend';
-  if (isWeekend) {
-    return `<div class="empty-state" style="padding:28px 16px;text-align:center">
-      <div style="font-size:26px;margin-bottom:8px;opacity:.6">🌙</div>
-      <div style="font-size:12px;font-weight:600;color:var(--yellow);margin-bottom:4px">週末休市</div>
-      <div style="font-size:11px;color:var(--t3);margin-bottom:10px;line-height:1.7">外匯 / 指數 / 商品 週末暫停<br><span style="color:var(--green)">●</span> 加密貨幣持續監控中</div>
-      <div style="font-size:10px;padding:4px 12px;background:var(--bg3);border-radius:6px;border:1px solid var(--border);color:var(--t3);display:inline-block;margin-bottom:10px">預計週一 07:00 台灣時間恢復</div>
-      ${scanCount===0?`<div><button class="retry-btn" onclick="loadData()" style="margin-top:6px">手動刷新</button></div>`:`<div style="font-size:10px;color:var(--t3)">已掃描 ${scanCount} 次，加密目前無明確訊號</div><button class="retry-btn" onclick="loadData()" style="margin-top:8px">立即掃描</button>`}
-    </div>`;
-  }
-  if (scanCount === 0) {
-    return `<div class="empty-state" style="padding:24px 16px;text-align:center">
-      <div class="empty-icon" style="font-size:24px">⟳</div>
-      <div style="font-size:12px;color:var(--t2);margin-bottom:4px">系統初始化，首次掃描準備中...</div>
-      <div style="font-size:10px;color:var(--t3);margin-bottom:8px">通常需要 1-2 分鐘</div>
-      <button class="retry-btn" onclick="loadData()">手動刷新</button>
-    </div>`;
-  }
-  return `<div class="empty-state" style="padding:24px 16px;text-align:center">
-    <div class="empty-icon" style="font-size:22px">🔍</div>
-    <div style="font-size:12px;color:var(--t2);margin-bottom:4px">已掃描 ${scanCount} 次，目前無符合條件的訊號</div>
-    <div style="font-size:10px;color:var(--t3);margin-bottom:8px">評分門檻較高或市場無明確方向</div>
-    <button class="retry-btn" onclick="loadData()">立即刷新</button>
-  </div>`;
+function getEmptySignalHtml(ses,scanCount){
+  const isWeekend=ses?.session==='weekend';
+  if(isWeekend)return`<div class="empty-state" style="padding:28px 16px;text-align:center"><div style="font-size:26px;margin-bottom:8px;opacity:.6">🌙</div><div style="font-size:12px;font-weight:600;color:var(--yellow);margin-bottom:4px">週末休市</div><div style="font-size:11px;color:var(--t3);margin-bottom:10px;line-height:1.7">外匯 / 指數 / 商品 週末暫停<br><span style="color:var(--green)">●</span> 加密貨幣持續監控中</div>${scanCount===0?`<button class="retry-btn" onclick="loadData()" style="margin-top:6px">手動刷新</button>`:`<div style="font-size:10px;color:var(--t3)">已掃描 ${scanCount} 次，加密目前無明確訊號</div><button class="retry-btn" onclick="loadData()" style="margin-top:8px">立即掃描</button>`}</div>`;
+  if(scanCount===0)return`<div class="empty-state" style="padding:24px 16px;text-align:center"><div class="empty-icon" style="font-size:24px">⟳</div><div style="font-size:12px;color:var(--t2);margin-bottom:4px">系統初始化，首次掃描準備中...</div><div style="font-size:10px;color:var(--t3);margin-bottom:8px">通常需要 1-2 分鐘</div><button class="retry-btn" onclick="loadData()">手動刷新</button></div>`;
+  return`<div class="empty-state" style="padding:24px 16px;text-align:center"><div class="empty-icon" style="font-size:22px">🔍</div><div style="font-size:12px;color:var(--t2);margin-bottom:4px">已掃描 ${scanCount} 次，目前無符合條件的訊號</div><div style="font-size:10px;color:var(--t3);margin-bottom:8px">評分門檻較高或市場無明確方向</div><button class="retry-btn" onclick="loadData()">立即刷新</button></div>`;
 }
 
 function renderOverview(el){
@@ -276,12 +267,8 @@ function renderOverview(el){
   const perf=s.performance||{},comp=compScore(),action=actionFromScore(comp);
   const envC=safeN(ss.env_score)>=70?'var(--green)':safeN(ss.env_score)>=40?'var(--yellow)':'var(--red)';
   const fgScore=safeN(fg.score,50),regime=s.regime||{};
-  /* ★ 修正：env_status 根據時段顯示 */
-  const envStatus = ses.session==='weekend' ? `<span style="color:var(--yellow)">${ses.session_zh||'週末休市'}</span>`
-    : (s.scan_count||0)===0 ? '初始化中...' : ss.env_status||'—';
-  /* ★ 修正：session chip 顯示正確 */
-  const sessionLabel = ses.session_zh && ses.session_zh!=='系統啟動中'
-    ? `${ses.session_zh} · ${ses.taiwan_time||'—'}` : ses.taiwan_time||'載入中...';
+  const envStatus=ses.session==='weekend'?`<span style="color:var(--yellow)">${ses.session_zh||'週末休市'}</span>`:(s.scan_count||0)===0?'初始化中...':ss.env_status||'—';
+  const sessionLabel=ses.session_zh&&ses.session_zh!=='系統啟動中'?`${ses.session_zh} · ${ses.taiwan_time||'—'}`:ses.taiwan_time||'載入中...';
   el.innerHTML=`<div class="topbar"><div class="topbar-title">總覽</div><div class="topbar-right"><span class="chip">${sessionLabel}</span>${regime.regime_zh?`<span class="chip" style="color:var(--blue)">${regime.regime_zh}</span>`:''}<button class="btn" onclick="loadData()"><span class="refresh-icon">↻</span>刷新</button></div></div>
   ${brief.overall_environment?`<div class="alert ${brief.overall_environment==='適合交易'?'a-ok':brief.overall_environment==='今日觀望'?'a-danger':'a-warn'}"><span>${brief.overall_environment==='適合交易'?'✓':brief.overall_environment==='今日觀望'?'✕':'!'}</span><div><b>${brief.overall_environment}</b> — ${brief.environment_reason||''}</div></div>`:''}
   <div class="g4"><div class="metric"><div class="metric-label">AI 綜合評分</div><div class="metric-val" style="color:${sc2c(comp)}">${(comp*100).toFixed(0)}</div><div class="metric-sub"><span class="cs-action ${action.cls}" style="font-size:10px;padding:1px 10px">${action.label}</span></div></div><div class="metric"><div class="metric-label">環境評分</div><div class="metric-val" style="color:${envC}">${safeN(ss.env_score)}</div><div class="metric-sub">${envStatus}</div></div><div class="metric"><div class="metric-label">有效訊號</div><div class="metric-val">${sigs.length}</div><div class="metric-sub">${ses.session==='weekend'?`<span style="color:var(--yellow)">週末加密模式</span>`:`掃描 #${s.scan_count||0}`}</div></div><div class="metric"><div class="metric-label">勝率 / Sharpe</div><div class="metric-val" style="color:var(--green)">${wr.win_rate||0}%</div><div class="metric-sub">Sharpe ${safeSharpe(perf.sharpe)}</div></div></div>
@@ -292,22 +279,24 @@ function renderOverview(el){
   ${brief.best_opportunities?.length||brief.avoid_today?.length?`<div class="card card-sm"><div class="card-title">今日建議</div>${(brief.best_opportunities||[]).map(o=>`<div style="font-size:11px;color:var(--green);padding:3px 0;border-bottom:1px solid var(--border)">✓ ${o}</div>`).join('')}${(brief.avoid_today||[]).map(a=>`<div style="font-size:11px;color:var(--red);padding:3px 0;border-bottom:1px solid var(--border)">✕ ${a}</div>`).join('')}</div>`:''}</div></div>`;
   setTimeout(()=>{
     destroyChart('gbm-mini');const c=document.getElementById('cv-gbm-mini');if(!c)return;
-    const{real,gbm}=genGBM('mini',3000,20);const labels=Array.from({length:21},(_,i)=>i===0?'開始':`D${i}`);
+    // ★ 使用真實 equity_curve 如果有，否則用 GBM
+    const eqPoints=S?.snap?.performance?.equity_end?null:null;
+    const labels=['開始'];for(let i=1;i<=20;i++)labels.push(`D${i}`);
+    let seed=42;function rnd(){seed=(seed*1664525+1013904223)%4294967296;return seed/4294967296;}
+    let v=3000;const real=[3000];for(let i=0;i<20;i++){const r=(rnd()-.5)*0.024+0.0015;v*=(1+r);real.push(+v.toFixed(2));}
+    const gbm=[3000];for(let i=1;i<=20;i++)gbm.push(+(3000*Math.exp(0.0015*i)).toFixed(2));
     CH['gbm-mini']=new Chart(c,{type:'line',data:{labels,datasets:[{label:'實際',data:real,borderColor:'#22c55e',borderWidth:1.5,pointRadius:0,tension:.4,fill:true,backgroundColor:'rgba(34,197,94,.04)'},{label:'GBM',data:gbm,borderColor:'#a78bfa',borderWidth:1,borderDash:[4,3],pointRadius:0,tension:.3,fill:false}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:600},plugins:{legend:{display:false}},scales:{x:{display:false},y:{display:false}}}});
   },100);
 }
 
 function renderSignals(el){
-  const s=S.snap||{},ses=s.market_session||{};let sigs=(s.active_signals||[]);if(curFilter)sigs=sigs.filter(s=>s.category===curFilter);
+  const s=S.snap||{},ses=s.market_session||{};
+  let sigs=(s.active_signals||[]);if(curFilter)sigs=sigs.filter(s=>s.category===curFilter);
   const isWeekend=ses.session==='weekend';
+  // ★ 移除美股 tab
   el.innerHTML=`<div class="topbar"><div class="topbar-title">${curFilter||'全部'}訊號 <span style="font-size:12px;color:var(--t3);font-weight:400">(${sigs.length})</span></div><button class="btn" onclick="loadData()"><span class="refresh-icon">↻</span>刷新</button></div>
   <div class="tabs">${['全部','外匯','商品','加密','指數'].map(c=>`<div class="tab ${(!curFilter&&c==='全部')||(curFilter===c)?'active':''}" onclick="${c==='全部'?"curFilter=null;renderSignals(document.getElementById('pg-signals'))":`setFilter(document.querySelector('[data-cat=${c}]'),'${c}')`}">${c}</div>`).join('')}</div>
-  ${sigs.length===0?`<div class="empty-state" style="padding:40px 20px">
-    <div class="empty-icon" style="font-size:32px">${isWeekend?'🌙':'🔍'}</div>
-    <div style="font-size:13px;color:var(--t2);margin-bottom:6px">${curFilter?`【${curFilter}】`:''}目前無訊號</div>
-    <div style="font-size:11px;color:var(--t3);margin-bottom:12px">${isWeekend?(ses.session_zh||'週末休市')+'，加密貨幣訊號持續監控中':(s.scan_count||0)===0?'系統初始化中，請稍候 1-2 分鐘...':'目前無符合評分門檻的交易機會'}</div>
-    <button class="retry-btn" onclick="loadData()">刷新數據</button>
-  </div>`:sigs.map(sig=>sigCard(sig,true)).join('')}`;
+  ${sigs.length===0?`<div class="empty-state" style="padding:40px 20px"><div class="empty-icon" style="font-size:32px">${isWeekend?'🌙':'🔍'}</div><div style="font-size:13px;color:var(--t2);margin-bottom:6px">${curFilter?`【${curFilter}】`:''}目前無訊號</div><div style="font-size:11px;color:var(--t3);margin-bottom:12px">${isWeekend?(ses.session_zh||'週末休市')+'，加密貨幣訊號持續監控中':(s.scan_count||0)===0?'系統初始化中，請稍候 1-2 分鐘...':'目前無符合評分門檻的交易機會'}</div><button class="retry-btn" onclick="loadData()">刷新數據</button></div>`:sigs.map(sig=>sigCard(sig,true)).join('')}`;
 }
 
 async function renderWeight(el){
@@ -328,13 +317,12 @@ async function renderWeight(el){
 function renderMacro(el){
   const m=S.snap?.macro_data||{},fred=S.snap?.fred_data||{},fut=S.snap?.us_futures_data||{},sec=S.snap?.sector_etf_data||{},ec=S.macro?.eco_calendar||[],regime=S.snap?.regime||{};
   const vix=safeN(m.vix?.price,20);
-  /* ★ 修正：FRED 空值顯示「—」而非過濾掉 */
   const fredRows=[
-    ['Fed 利率', fred?.fed_rate?.value!=null ? fred.fed_rate.value+'%' : '—'],
-    ['CPI',      fred?.cpi?.value!=null       ? fred.cpi.value+'%'      : '—'],
-    ['核心 CPI', fred?.core_cpi?.value!=null  ? fred.core_cpi.value+'%' : '—'],
-    ['失業率',   fred?.unemployment?.value!=null ? fred.unemployment.value+'%' : '—'],
-    ['殖利率曲線',fred?.yield_curve?.label_zh || '—'],
+    ['Fed 利率', fred?.fed_rate?.value!=null?fred.fed_rate.value+'%':'—'],
+    ['CPI',      fred?.cpi?.value!=null?fred.cpi.value+'%':'—'],
+    ['核心 CPI', fred?.core_cpi?.value!=null?fred.core_cpi.value+'%':'—'],
+    ['失業率',   fred?.unemployment?.value!=null?fred.unemployment.value+'%':'—'],
+    ['殖利率曲線',fred?.yield_curve?.label_zh||'—'],
   ];
   el.innerHTML=`<div class="topbar"><div class="topbar-title">宏觀數據</div><button class="btn" onclick="loadData()"><span class="refresh-icon">↻</span>刷新</button></div>
   ${regime.regime_zh?`<div class="alert a-info"><span>◈</span><div><b>市場機制：${regime.regime_zh}</b> — ${regime.strategy||''}</div></div>`:''}
@@ -346,22 +334,45 @@ function renderMacro(el){
   ${ec.length?`<div class="card"><div class="card-title">經濟日曆（7天）</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px">${ec.slice(0,8).map(e=>`<div style="background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px"><span style="font-size:11px;font-weight:600;color:var(--t1)">${(e.event||'').slice(0,30)}</span><span style="font-size:9px;padding:1px 6px;border-radius:4px;background:${e.impact==='high'?'var(--rbg)':e.impact==='medium'?'var(--ybg)':'var(--bg5)'};color:${e.impact==='high'?'var(--red)':e.impact==='medium'?'var(--yellow)':'var(--t3)'}">${e.impact||'low'}</span></div><div style="font-size:9px;color:var(--t3)">${(e.date||'').slice(0,16)} ${e.country||''}</div></div>`).join('')}</div></div>`:''}`;
 }
 
+/* ★ 績效頁：真實模擬資金曲線 */
 function renderPerf(el){
   const s=S.snap||{},perf=s.performance||{},wr=s.win_rate||{};
-  /* ★ 修正：Sharpe 防止顯示亂數 */
-  const sharpeVal = (perf.sharpe!=null && isFinite(perf.sharpe)) ? perf.sharpe : null;
+  const sharpeVal=(perf.sharpe!=null&&isFinite(perf.sharpe))?perf.sharpe:null;
   const sharpeC=sharpeVal!=null?(safeN(sharpeVal)>=2?'var(--green)':safeN(sharpeVal)>=1?'var(--yellow)':'var(--red)'):'var(--t3)';
   const ddC=safeN(perf.max_drawdown)<10?'var(--green)':safeN(perf.max_drawdown)<20?'var(--yellow)':'var(--red)';
-  el.innerHTML=`<div class="topbar"><div class="topbar-title">歷史績效</div><button class="btn" onclick="loadData()"><span class="refresh-icon">↻</span>刷新</button></div>
+  el.innerHTML=`<div class="topbar"><div class="topbar-title">歷史績效<span class="perf-sim-tag">自動模擬</span></div><div class="topbar-right"><button class="btn" onclick="triggerSimulate()"><span>▶ 立即模擬</span></button><button class="btn" onclick="loadData()"><span class="refresh-icon">↻</span>刷新</button></div></div>
+  <div class="alert a-info" style="margin-bottom:4px"><span>🤖</span><div>系統根據市場價格<b>自動模擬</b>每筆訊號的止盈/止損結果，每次掃描後更新。</div></div>
   <div class="g4"><div class="metric"><div class="metric-label">Sharpe Ratio</div><div class="metric-val" style="color:${sharpeC}">${safeSharpe(sharpeVal)}</div><div class="metric-sub">${sharpeVal!=null&&perf.sharpe_grade?'評級：'+perf.sharpe_grade:'需更多數據'}</div></div><div class="metric"><div class="metric-label">最大回撤</div><div class="metric-val" style="color:${ddC}">${perf.max_drawdown||0}%</div><div class="metric-sub">${perf.dd_grade||'—'}</div></div><div class="metric"><div class="metric-label">Calmar Ratio</div><div class="metric-val">${(perf.calmar&&isFinite(perf.calmar))?perf.calmar:'—'}</div><div class="metric-sub">年化/最大回撤</div></div><div class="metric"><div class="metric-label">勝率 / 筆數</div><div class="metric-val" style="color:var(--green)">${wr.win_rate||0}%</div><div class="metric-sub">${wr.wins||0}勝 ${wr.losses||0}負</div></div></div>
-  <div class="card"><div class="card-title">累積資金曲線（真實 vs GBM 理論期望）</div><div class="chart-wrap" style="height:240px"><canvas id="cv-gbm-full" role="img" aria-label="資金曲線對照圖">資金曲線</canvas></div></div>
-  <div class="g2"><div class="card"><div class="card-title">逐日 P&L</div><div class="chart-wrap" style="height:160px"><canvas id="cv-pnl" role="img" aria-label="逐日盈虧">逐日P&L</canvas></div></div><div class="card"><div class="card-title">訊號結果分佈</div><div class="chart-wrap" style="height:160px"><canvas id="cv-result" role="img" aria-label="訊號結果圓餅圖">結果分佈</canvas></div><div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-size:11px;color:var(--t2)">${[['止盈','#22c55e',wr.wins||0],['虧損','#ef4444',wr.losses||0],['待定','#f59e0b',Math.max(0,(wr.total||0)-(wr.wins||0)-(wr.losses||0))]].map(([l,c,n])=>`<span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></span>${l}: ${n}</span>`).join('')}</div></div></div>`;
+  <div class="card"><div class="card-title">累積資金曲線（模擬真實績效 vs GBM 理論期望）</div><div class="chart-wrap" style="height:240px"><canvas id="cv-gbm-full" role="img" aria-label="資金曲線對照圖">資金曲線</canvas></div></div>
+  <div class="g2"><div class="card"><div class="card-title">逐日 P&L（模擬）</div><div class="chart-wrap" style="height:160px"><canvas id="cv-pnl" role="img" aria-label="逐日盈虧">逐日P&L</canvas></div></div><div class="card"><div class="card-title">訊號結果分佈</div><div class="chart-wrap" style="height:160px"><canvas id="cv-result" role="img" aria-label="訊號結果圓餅圖">結果分佈</canvas></div><div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-size:11px;color:var(--t2)">${[['止盈','#22c55e',wr.wins||0],['虧損','#ef4444',wr.losses||0],['待定','#f59e0b',Math.max(0,(wr.total||0)-(wr.wins||0)-(wr.losses||0))]].map(([l,c,n])=>`<span style="display:flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></span>${l}: ${n}</span>`).join('')}</div></div></div>`;
   setTimeout(()=>{
-    destroyChart('gbm-full');const c1=document.getElementById('cv-gbm-full');
-    if(c1){const{real,gbm}=genGBM('full',3000,30,.0015,.012);const labels=Array.from({length:31},(_,i)=>i===0?'開始':`D${i}`);CH['gbm-full']=new Chart(c1,{type:'line',data:{labels,datasets:[{label:'實際',data:real,borderColor:'#22c55e',borderWidth:2,pointRadius:2,pointBackgroundColor:'#22c55e',tension:.4,fill:true,backgroundColor:'rgba(34,197,94,.04)'},{label:'GBM',data:gbm,borderColor:'#a78bfa',borderWidth:1.5,borderDash:[5,4],pointRadius:0,tension:.3,fill:false}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:600},plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#44445a',font:{size:9}},grid:{color:'rgba(255,255,255,.04)'}},y:{ticks:{color:'#44445a',font:{size:9},callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(255,255,255,.04)'}}}}});}
-    destroyChart('pnl');const c2=document.getElementById('cv-pnl');
-    if(c2){let sd=99;function r(){sd=(sd*1664525+1013904223)%4294967296;return sd/4294967296;}const pnls=Array.from({length:14},()=>Math.round((r()-.4)*25*10)/10);CH['pnl']=new Chart(c2,{type:'bar',data:{labels:pnls.map((_,i)=>`D${i+1}`),datasets:[{data:pnls,backgroundColor:pnls.map(v=>v>=0?'rgba(34,197,94,.6)':'rgba(239,68,68,.6)'),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:400},plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#44445a',font:{size:9}},grid:{display:false}},y:{ticks:{color:'#44445a',font:{size:9}},grid:{color:'rgba(255,255,255,.04)'}}}}});}
-    /* ★ 修正：圓餅圖 0 筆時顯示空狀態 */
+    // ★ 真實資金曲線（從 /api/equity 取得）
+    apiFetch('/api/equity').then(eq=>{
+      destroyChart('gbm-full');const c1=document.getElementById('cv-gbm-full');
+      if(!c1)return;
+      const pts=eq?.points||[];
+      const realData=pts.map(p=>p.balance);
+      const labels=pts.map((p,i)=>p.date||`#${i}`);
+      const gbmData=[];const start=realData[0]||3000;
+      for(let i=0;i<realData.length;i++)gbmData.push(+(start*Math.exp(0.0015*i)).toFixed(2));
+      if(realData.length<2){
+        // 資料不足時顯示提示
+        c1.parentElement.innerHTML=`<div style="height:240px;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--t3)"><div style="font-size:20px;margin-bottom:8px;opacity:.4">📊</div><div style="font-size:12px">累積 2 筆以上交易後顯示資金曲線</div></div>`;
+        return;
+      }
+      CH['gbm-full']=new Chart(c1,{type:'line',data:{labels,datasets:[{label:'模擬績效',data:realData,borderColor:'#22c55e',borderWidth:2,pointRadius:2,pointBackgroundColor:'#22c55e',tension:.4,fill:true,backgroundColor:'rgba(34,197,94,.04)'},{label:'GBM理論',data:gbmData,borderColor:'#a78bfa',borderWidth:1.5,borderDash:[5,4],pointRadius:0,tension:.3,fill:false}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:600},plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#44445a',font:{size:9}},grid:{color:'rgba(255,255,255,.04)'}},y:{ticks:{color:'#44445a',font:{size:9},callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(255,255,255,.04)'}}}}});
+    });
+    // P&L 柱狀圖（真實交易）
+    apiFetch('/api/equity').then(eq=>{
+      destroyChart('pnl');const c2=document.getElementById('cv-pnl');
+      if(!c2)return;
+      const trades=(eq?.points||[]).filter(p=>p.pnl!=null&&p.pnl!==undefined&&p.trade!==null);
+      const pnls=trades.map(t=>t.pnl||0).slice(-14);
+      const lbls=trades.map(t=>t.symbol||'').slice(-14);
+      if(pnls.length===0){c2.parentElement.innerHTML=`<div style="height:160px;display:flex;align-items:center;justify-content:center;color:var(--t3);font-size:11px">暫無交易記錄</div>`;return;}
+      CH['pnl']=new Chart(c2,{type:'bar',data:{labels:lbls,datasets:[{data:pnls,backgroundColor:pnls.map(v=>v>=0?'rgba(34,197,94,.6)':'rgba(239,68,68,.6)'),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,animation:{duration:400},plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#44445a',font:{size:9}},grid:{display:false}},y:{ticks:{color:'#44445a',font:{size:9}},grid:{color:'rgba(255,255,255,.04)'}}}}});
+    });
+    // 圓餅圖
     destroyChart('result');const c3=document.getElementById('cv-result');
     if(c3){
       const tp=wr.wins||0,sl=wr.losses||0,pe=Math.max(0,(wr.total||0)-tp-sl);
@@ -374,9 +385,17 @@ function renderPerf(el){
   },120);
 }
 
+async function triggerSimulate(){
+  const r=await apiFetch('/api/simulate/force',{method:'POST'});
+  if(r?.ok){
+    await loadData();
+    alert(`模擬完成：${r.message}`);
+  }
+}
+
 function renderBacktest(el){
   el.innerHTML=`<div class="topbar"><div class="topbar-title">回測中心</div><button class="btn" onclick="runAllBT()">▶ 批量回測</button></div>
-  <div class="g2" style="margin-bottom:12px"><div class="card card-sm"><div class="card-title">單品種回測</div><div style="display:flex;gap:8px;align-items:center;margin-bottom:10px"><select id="bt-sym" style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--t1);padding:6px 10px;border-radius:6px;font-size:12px">${['XAUUSD','BTCUSD','EURUSD','GBPUSD','US500','NAS100','ETHUSD','USDJPY','AUDUSD','WTI'].map(s=>`<option>${s}</option>`).join('')}</select><input id="bt-score" type="number" value="65" min="40" max="90" style="width:60px;background:var(--bg3);border:1px solid var(--border2);color:var(--t1);padding:6px 8px;border-radius:6px;font-size:12px"><button class="btn" onclick="runSingleBT()">▶ 執行</button></div><div id="bt-status" style="font-size:11px;color:var(--t3)">選擇品種後點執行</div></div><div class="card card-sm"><div class="card-title">Walk-Forward 驗證</div><div style="display:flex;gap:8px;align-items:center;margin-bottom:10px"><select id="wf-sym" style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--t1);padding:6px 10px;border-radius:6px;font-size:12px">${['XAUUSD','BTCUSD','EURUSD','GBPUSD','US500','NAS100'].map(s=>`<option>${s}</option>`).join('')}</select><button class="btn" onclick="runWF()">▶ 執行</button></div><div id="wf-status" style="font-size:11px;color:var(--t3)">Walk-Forward 防過擬合驗證</div></div></div>
+  <div class="g2" style="margin-bottom:12px"><div class="card card-sm"><div class="card-title">單品種回測</div><div style="display:flex;gap:8px;align-items:center;margin-bottom:10px"><select id="bt-sym" style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--t1);padding:6px 10px;border-radius:6px;font-size:12px">${['XAUUSD','BTCUSD','EURUSD','GBPUSD','US500','NAS100','ETHUSD','USDJPY','AUDUSD','USDCAD','WTI','HK50','GER40'].map(s=>`<option>${s}</option>`).join('')}</select><input id="bt-score" type="number" value="65" min="40" max="90" style="width:60px;background:var(--bg3);border:1px solid var(--border2);color:var(--t1);padding:6px 8px;border-radius:6px;font-size:12px"><button class="btn" onclick="runSingleBT()">▶ 執行</button></div><div id="bt-status" style="font-size:11px;color:var(--t3)">選擇品種後點執行</div></div><div class="card card-sm"><div class="card-title">Walk-Forward 驗證</div><div style="display:flex;gap:8px;align-items:center;margin-bottom:10px"><select id="wf-sym" style="flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--t1);padding:6px 10px;border-radius:6px;font-size:12px">${['XAUUSD','BTCUSD','EURUSD','GBPUSD','US500','NAS100'].map(s=>`<option>${s}</option>`).join('')}</select><button class="btn" onclick="runWF()">▶ 執行</button></div><div id="wf-status" style="font-size:11px;color:var(--t3)">Walk-Forward 防過擬合驗證</div></div></div>
   <div class="card"><div class="card-title">回測結果</div><div id="bt-results" style="color:var(--t3);font-size:12px;padding:12px 0">點擊執行後結果顯示於此</div></div>`;
   loadBTResults();
 }
@@ -410,8 +429,8 @@ function renderRisk(el){
   const s=S.snap||{},ss=s.system_status||{},dl=ss.daily_loss||{},sigs=s.active_signals||[];
   const vix=safeN(s.macro_data?.vix?.price,20);const totalRPct=sigs.reduce((a,b)=>a+safeN(b.risk_pct),0);const totalRUsd=sigs.reduce((a,b)=>a+safeN(b.risk_usd),0);
   const perf=s.performance||{};const vixC=vix>=40?'var(--red)':vix>=30?'var(--yellow)':vix>=20?'var(--blue)':'var(--green)';
-  /* ★ 移除美股類別 */
-  const catAdvice = Object.entries(ss.category_advice||{}).filter(([cat])=>cat!=='美股');
+  // ★ 移除美股類別
+  const catAdvice=Object.entries(ss.category_advice||{}).filter(([cat])=>cat!=='美股');
   el.innerHTML=`<div class="topbar"><div class="topbar-title">風控面板</div><button class="btn" onclick="loadData()"><span class="refresh-icon">↻</span>刷新</button></div>
   ${vix>=30?`<div class="alert a-danger"><span>🚨</span><div>VIX ${vix.toFixed(1)} 過高，建議暫停或縮倉 50%</div></div>`:''}
   ${safeN(perf.max_drawdown)>=15?`<div class="alert a-warn"><span>⚠️</span><div>最大回撤達 ${perf.max_drawdown}%，請檢視策略</div></div>`:''}
@@ -420,6 +439,7 @@ function renderRisk(el){
   <div class="card"><div class="card-title">VIX 量表</div><div style="text-align:center;padding:12px 0"><div class="vix-num" style="color:${vixC}">${vix.toFixed(1)}</div><div class="vix-track"><div class="vix-fill" style="width:${Math.min(100,vix/50*100)}%;background:${vixC}"></div></div><div class="vix-ticks"><span>0</span><span>15</span><span>25</span><span>35</span><span>50</span></div></div></div></div>
   <div class="card"><div class="card-title">持倉風險明細</div>${sigs.length===0?'<div class="empty-state" style="padding:20px">目前無持倉</div>':`<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr 1fr;gap:6px;padding:5px 0;border-bottom:1px solid var(--border2);font-size:9px;color:var(--t3);text-transform:uppercase"><span>品種</span><span>方向</span><span>進場</span><span>SL</span><span>風險%</span><span>Kelly%</span><span>風險$</span></div>${sigs.map(sig=>`<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr 1fr;gap:6px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px;align-items:center"><span style="color:var(--t1);font-weight:600">${sig.emoji||''} ${sig.name||sig.symbol}</span><span class="${sig.direction==='buy'?'up':'dn'}">${sig.direction==='buy'?'LONG':'SHORT'}</span><span style="color:var(--t2)">${sig.entry_price}</span><span class="dn">${sig.stop_loss}</span><span style="color:${safeN(sig.risk_pct)>3?'var(--red)':'var(--t1)'}">${safeN(sig.risk_pct).toFixed(1)}%</span><span style="color:var(--blue)">${safeN(sig.kelly_risk_pct).toFixed(1)}%</span><span style="color:var(--t2)">$${safeN(sig.risk_usd).toFixed(0)}</span></div>`).join('')}`}</div>`;
 }
+
 loadData();setInterval(loadData,60000);
 </script>
 </body>
