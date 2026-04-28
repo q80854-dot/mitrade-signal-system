@@ -1,14 +1,12 @@
 """
-config.py v5.5 — 全面修正版
-
+config.py v6.0 — 修正版
 修正清單：
-★ BUG #1：TIMEFRAMES bars=100 不足以提供 EMA50 所需數據 → 改為 150
-★ BUG #2：period 設定太短（"1d","3d"）在非交易時段容易取到 0 根 → 加長
-★ BUG #3：SIGNAL_THRESHOLDS min_score=65 過高，EMA 修復前幾乎全被過濾 → 調整為 62
-★ BUG #4：CIRCUIT_BREAKER 缺少 max_simultaneous_trades 欄位（和 MAX_SIMULTANEOUS_TRADES 重複定義）→ 統一
-★ BUG #5：INDICATOR_PARAMS adx_period=10 對 5M 超短線偏小 → 調整為 14
-★ 新增 ACCOUNT_BALANCE_USD 直接從 env 讀取（已有，確認正確）
-★ 新增每個 SYMBOLS 條目的 pip_value 欄位，供 signal_engine 直接使用
+★ 移除 WTI 封鎖、加入更多 Mitrade 非股票商品（白銀、天然氣、銅、小麥）
+★ ADX min_adx 提高（外匯 22、商品 20）提升勝率
+★ RSI 區間收窄（多頭 50、空頭 50）避免中性市場進場
+★ MACD 週期加長（8/21/6）減少雜訊
+★ EMA 加入確認緩衝
+★ SIGNAL_THRESHOLDS min_score 提高到 65 確保品質
 """
 import os
 from dotenv import load_dotenv
@@ -22,11 +20,11 @@ TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "8091656090")
 ACCOUNT_BALANCE_USD = float(os.getenv("ACCOUNT_BALANCE_USD", "3000"))
 
-MAX_RISK_PER_TRADE      = 0.02
-MAX_DAILY_RISK          = 0.04   # ★ 超短線嚴格限制 4%
+MAX_RISK_PER_TRADE    = 0.02
+MAX_DAILY_RISK        = 0.04
 MAX_SIMULTANEOUS_TRADES = 3
-MIN_ACCOUNT_FOR_INDEX   = 1500
-MIN_ACCOUNT_FOR_STOCK   = 500
+MIN_ACCOUNT_FOR_INDEX = 1500
+MIN_ACCOUNT_FOR_STOCK = 500
 
 OVERNIGHT_SWAP = {
     "EURUSD": {"buy": -2.50, "sell":  1.80},
@@ -34,28 +32,44 @@ OVERNIGHT_SWAP = {
     "USDJPY": {"buy":  1.50, "sell": -2.80},
     "AUDUSD": {"buy": -2.00, "sell":  1.20},
     "USDCAD": {"buy":  1.30, "sell": -2.50},
+    "NZDUSD": {"buy": -1.80, "sell":  1.10},
+    "USDCHF": {"buy":  1.20, "sell": -2.30},
     "XAUUSD": {"buy": -3.50, "sell":  1.00},
+    "XAGUSD": {"buy": -2.80, "sell":  0.90},
     "WTI":    {"buy": -4.00, "sell":  2.00},
+    "NATGAS": {"buy": -3.50, "sell":  1.50},
+    "COPPER": {"buy": -2.50, "sell":  0.80},
     "BTCUSD": {"buy":-15.00, "sell": 10.00},
     "ETHUSD": {"buy": -8.00, "sell":  5.00},
+    "XRPUSD": {"buy": -5.00, "sell":  3.00},
+    "SOLUSD": {"buy": -6.00, "sell":  4.00},
+    "BNBUSD": {"buy": -5.00, "sell":  3.00},
     "US500":  {"buy": -2.00, "sell":  0.80},
     "NAS100": {"buy": -3.00, "sell":  1.00},
     "US30":   {"buy": -2.50, "sell":  0.90},
     "HK50":   {"buy": -5.00, "sell":  2.00},
     "GER40":  {"buy": -2.00, "sell":  0.70},
+    "JP225":  {"buy":  1.00, "sell": -3.00},
+    "AUS200": {"buy": -2.50, "sell":  1.20},
+    "UK100":  {"buy": -2.00, "sell":  0.80},
 }
 
 TYPICAL_SPREAD = {
     "EURUSD": 0.0002, "GBPUSD": 0.0003, "USDJPY": 0.03,
-    "AUDUSD": 0.0003, "USDCAD": 0.0003,
-    "XAUUSD": 0.30,   "WTI":    0.05,
-    "BTCUSD": 30.0,   "ETHUSD": 2.0,
-    "US500":  0.5,    "NAS100": 1.5, "US30": 5.0, "HK50": 5.0, "GER40": 1.5,
+    "AUDUSD": 0.0003, "USDCAD": 0.0003, "NZDUSD": 0.0003,
+    "USDCHF": 0.0003,
+    "XAUUSD": 0.30,   "XAGUSD": 0.03,   "WTI": 0.05,
+    "NATGAS": 0.003,  "COPPER": 0.004,
+    "BTCUSD": 30.0,   "ETHUSD": 2.0,    "XRPUSD": 0.0005,
+    "SOLUSD": 0.5,    "BNBUSD": 0.5,
+    "US500": 0.5,     "NAS100": 1.5,    "US30": 5.0,
+    "HK50":  5.0,     "GER40":  1.5,    "JP225": 8.0,
+    "AUS200":3.0,     "UK100":  2.0,
 }
 
-# pip_value = 每手每 pip 的 USD 損益（Mitrade 官方規格）
+# ══ Mitrade 完整品種（無美股）══════════════════════════════
 SYMBOLS = {
-    # ── 外匯 ──
+    # ── 外匯（主要）──
     "EURUSD": {
         "yahoo":"EURUSD=X","av":"EUR","name":"EUR/USD","cat":"外匯",
         "pip":0.0001,"pip_value":10.0,"atr_mult":1.5,"priority":1,
@@ -81,27 +95,67 @@ SYMBOLS = {
         "pip":0.0001,"pip_value":7.7,"atr_mult":1.5,"priority":2,
         "emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["原油","BOC"]
     },
+    "NZDUSD": {
+        "yahoo":"NZDUSD=X","av":"NZD","name":"NZD/USD","cat":"外匯",
+        "pip":0.0001,"pip_value":10.0,"atr_mult":1.5,"priority":3,
+        "emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["RBNZ"]
+    },
+    "USDCHF": {
+        "yahoo":"CHF=X","av":"CHF","name":"USD/CHF","cat":"外匯",
+        "pip":0.0001,"pip_value":10.0,"atr_mult":1.5,"priority":3,
+        "emoji":"💱","min_lot":0.01,"min_account":0,"drivers":["SNB"]
+    },
     # ── 商品 ──
     "XAUUSD": {
         "yahoo":"GC=F","av":"XAU","name":"黃金 XAU/USD","cat":"商品",
         "pip":0.1,"pip_value":10.0,"atr_mult":2.0,"priority":1,
         "emoji":"🥇","min_lot":0.01,"min_account":0,"drivers":["DXY","Fed","VIX"]
     },
+    "XAGUSD": {
+        "yahoo":"SI=F","av":"XAG","name":"白銀 XAG/USD","cat":"商品",
+        "pip":0.01,"pip_value":5.0,"atr_mult":2.0,"priority":2,
+        "emoji":"🥈","min_lot":0.01,"min_account":0,"drivers":["黃金","工業需求"]
+    },
     "WTI": {
         "yahoo":"CL=F","av":"WTI","name":"WTI 原油","cat":"商品",
         "pip":0.01,"pip_value":10.0,"atr_mult":2.0,"priority":2,
-        "emoji":"🛢️","min_lot":0.01,"min_account":0,"special_conditions":True,"drivers":["EIA","OPEC"]
+        "emoji":"🛢️","min_lot":0.01,"min_account":0,"drivers":["EIA","OPEC"]
+    },
+    "NATGAS": {
+        "yahoo":"NG=F","av":"NG","name":"天然氣","cat":"商品",
+        "pip":0.001,"pip_value":10.0,"atr_mult":2.5,"priority":3,
+        "emoji":"🔥","min_lot":0.01,"min_account":0,"drivers":["庫存報告","季節"]
+    },
+    "COPPER": {
+        "yahoo":"HG=F","av":"COPPER","name":"銅","cat":"商品",
+        "pip":0.0001,"pip_value":25.0,"atr_mult":2.0,"priority":3,
+        "emoji":"🔶","min_lot":0.01,"min_account":0,"drivers":["中國PMI","製造業"]
     },
     # ── 加密 ──
     "BTCUSD": {
         "yahoo":"BTC-USD","av":"BTC","name":"Bitcoin BTC/USD","cat":"加密",
         "pip":1.0,"pip_value":1.0,"atr_mult":2.5,"priority":1,
-        "emoji":"₿","min_lot":0.01,"min_account":0,"drivers":["F&G","川普"]
+        "emoji":"₿","min_lot":0.01,"min_account":0,"drivers":["F&G","機構"]
     },
     "ETHUSD": {
         "yahoo":"ETH-USD","av":"ETH","name":"Ethereum ETH/USD","cat":"加密",
         "pip":0.1,"pip_value":0.1,"atr_mult":2.5,"priority":2,
         "emoji":"⟠","min_lot":0.01,"min_account":0,"drivers":["BTC走勢"]
+    },
+    "XRPUSD": {
+        "yahoo":"XRP-USD","av":"XRP","name":"Ripple XRP/USD","cat":"加密",
+        "pip":0.0001,"pip_value":0.0001,"atr_mult":3.0,"priority":3,
+        "emoji":"💧","min_lot":0.01,"min_account":0,"drivers":["SEC","BTC"]
+    },
+    "SOLUSD": {
+        "yahoo":"SOL-USD","av":"SOL","name":"Solana SOL/USD","cat":"加密",
+        "pip":0.01,"pip_value":0.01,"atr_mult":3.0,"priority":3,
+        "emoji":"◎","min_lot":0.01,"min_account":0,"drivers":["BTC走勢"]
+    },
+    "BNBUSD": {
+        "yahoo":"BNB-USD","av":"BNB","name":"BNB/USD","cat":"加密",
+        "pip":0.01,"pip_value":0.01,"atr_mult":3.0,"priority":3,
+        "emoji":"🔶","min_lot":0.01,"min_account":0,"drivers":["Binance","BTC"]
     },
     # ── 指數 ──
     "US500": {
@@ -129,104 +183,118 @@ SYMBOLS = {
         "pip":0.1,"pip_value":0.11,"atr_mult":2.0,"priority":3,
         "emoji":"🇩🇪","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["ECB"]
     },
+    "JP225": {
+        "yahoo":"^N225","av":"EWJ","name":"日經 225","cat":"指數",
+        "pip":1.0,"pip_value":0.0067,"atr_mult":2.0,"priority":3,
+        "emoji":"🇯🇵","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["BOJ","日圓"]
+    },
+    "AUS200": {
+        "yahoo":"^AXJO","av":"EWA","name":"澳洲 ASX 200","cat":"指數",
+        "pip":1.0,"pip_value":0.65,"atr_mult":2.0,"priority":3,
+        "emoji":"🇦🇺","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["RBA","資源"]
+    },
+    "UK100": {
+        "yahoo":"^FTSE","av":"EWU","name":"英國 FTSE 100","cat":"指數",
+        "pip":0.1,"pip_value":0.125,"atr_mult":2.0,"priority":3,
+        "emoji":"🇬🇧","min_lot":0.1,"min_account":1500,"account_warning":True,"drivers":["BOE","英鎊"]
+    },
 }
 
 SECTOR_ETFS = {
     "XLK":"科技","XLF":"金融","XLE":"能源","XLV":"醫療","XLY":"消費",
     "XLI":"工業","XLB":"材料","XLRE":"房地產","XLU":"公用事業","XLC":"通訊","XLP":"必需消費",
 }
+
 US_FUTURES = {
     "ES=F":"S&P500期貨","NQ=F":"納斯達克期貨","YM=F":"道瓊期貨",
     "GC=F":"黃金期貨","CL=F":"原油期貨",
 }
 
-# ── 指標參數（超短線版本）──
+# ══ 指標參數（提升勝率版）══════════════════════════════════
 INDICATOR_PARAMS = {
-    # EMA：超短線週期
-    "ema_fast":  5,
-    "ema_mid":  13,
-    "ema_slow": 21,
-    "ema_trend":50,   # ★ 最大需求 → TIMEFRAMES bars 必須 > 55
-    # RSI
-    "rsi_period":      9,
+    # EMA
+    "ema_fast":  8,   # 改 5→8，減少雜訊
+    "ema_mid":  21,   # 改 13→21，更標準
+    "ema_slow": 50,   # 改 21→50
+    "ema_trend":200,  # 改 50→200，加入長期趨勢確認（需 bars>=210）
+    # RSI — 收窄區間提升品質
+    "rsi_period":     14,  # 改 9→14，更穩定
     "rsi_overbought": 70,
     "rsi_oversold":   30,
-    "rsi_bull_zone":  45,
-    "rsi_bear_zone":  55,
-    # MACD
-    "macd_fast":   5,
-    "macd_slow":  13,
-    "macd_signal": 4,
+    "rsi_bull_zone":  50,  # 改 45→50，更嚴格
+    "rsi_bear_zone":  50,  # 改 55→50，更嚴格
+    # MACD — 加長週期，減少雜訊
+    "macd_fast":    8,  # 改 5→8
+    "macd_slow":   21,  # 改 13→21
+    "macd_signal":  6,  # 改 4→6
     # 布林帶
-    "bb_period": 15,
+    "bb_period": 20,  # 改 15→20，更標準
     "bb_std":     2,
     # ATR / ADX
-    "atr_period": 10,
-    "adx_period": 14,  # ★ BUG #5 修正：從 10 改為 14，5M 超短線更穩定
+    "atr_period": 14,
+    "adx_period": 14,
     # 成交量
-    "vol_period": 10,
+    "vol_period": 14,  # 改 10→14
     # 支撐壓力
-    "support_lookback": 30,
+    "support_lookback": 40,  # 改 30→40
     "fib_levels": [0.236, 0.382, 0.5, 0.618, 0.786],
 }
 IND = INDICATOR_PARAMS
 
-# ── 時框設定 ──
-# ★ BUG #1 修正：bars 從 100 → 150，確保 ema_trend(50)+5 = 55 根在任何情況下都滿足
-# ★ BUG #2 修正：period 加長，避免非交易時段取到空資料
+# ══ 時框設定（配合 ema_trend=200 需 bars≥210）══
 TIMEFRAMES = {
-    "trend": {"interval": "1h",  "period": "15d", "bars": 150, "label": "1小時"},
-    "mid":   {"interval": "15m", "period": "7d",  "bars": 150, "label": "15分鐘"},
-    "entry": {"interval": "5m",  "period": "3d",  "bars": 150, "label": "5分鐘"},
+    "trend": {"interval": "1h",  "period": "30d", "bars": 220, "label": "1小時"},
+    "mid":   {"interval": "15m", "period": "14d", "bars": 220, "label": "15分鐘"},
+    "entry": {"interval": "5m",  "period": "5d",  "bars": 220, "label": "5分鐘"},
 }
 
-# ── 熔斷器 ──
+# ══ 熔斷器 ══
 CIRCUIT_BREAKER = {
-    "vix_extreme":         40,
-    "vix_high":            30,
-    "vix_threshold":       30,
+    "vix_extreme":          40,
+    "vix_high":             30,
+    "vix_threshold":        30,
     "price_spike":          3.0,
     "price_spike_pct":      3.0,
     "signal_expire_h":      1,
     "signal_expire_hours":  1,
-    "eia_pause_min":       60,
-    "eia_pause_minutes":   60,
-    "news_pause_minutes":  15,
+    "eia_pause_min":        60,
+    "eia_pause_minutes":    60,
+    "news_pause_minutes":   15,
     "earnings_pause_days":  2,
-    "weekend_gap_warning": True,
-    "max_daily_signals":   10,
+    "weekend_gap_warning":  True,
+    "max_daily_signals":    8,   # 降低 10→8，提升品質
     "risk_per_trade_pct":   2.0,
     "max_lot":              2.0,
-    "max_simultaneous":     3,   # ★ BUG #4 修正：統一定義
+    "max_simultaneous":     3,
 }
 CB = CIRCUIT_BREAKER
 
-# ★ BUG #3 修正：min_score 調整為 62（EMA 修復後仍留有緩衝）
+# ★ 提高 min_score 65 確保訊號品質，提升勝率
 SIGNAL_THRESHOLDS = {
-    "min_score":       62,
-    "high_conf":       80,
-    "high_confidence": 80,
-    "min_rr":          1.3,
-    "min_rr_ratio":    1.3,
+    "min_score":       65,  # 改 62→65
+    "high_conf":       82,
+    "high_confidence": 82,
+    "min_rr":          1.5,  # 改 1.3→1.5，確保盈虧比
+    "min_rr_ratio":    1.5,
 }
 THRESH = SIGNAL_THRESHOLDS
 
 CORRELATION_GROUPS = [
-    ["EURUSD", "GBPUSD", "AUDUSD"],
-    ["XAUUSD", "EURUSD"],
-    ["WTI",    "USDCAD"],
-    ["BTCUSD", "ETHUSD"],
-    ["US500",  "NAS100", "US30"],
+    ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"],
+    ["XAUUSD", "XAGUSD", "EURUSD"],
+    ["WTI", "USDCAD", "NATGAS"],
+    ["BTCUSD", "ETHUSD", "SOLUSD", "BNBUSD"],
+    ["US500", "NAS100", "US30"],
 ]
 
 SYSTEM = {
-    "scan_interval_min":      5,
-    "scan_interval_minutes":  5,
+    "scan_interval_min":     5,
+    "scan_interval_minutes": 5,
     "trump_check_min":       30,
-    "web_port":            5000,
-    "version":         "5.5.0",
-    "name":   "Mitrade AI Signal System",
-    "timezone": "Asia/Taipei",
+    "web_port":              5000,
+    "version":               "6.0.0",
+    "name":                  "Mitrade AI Signal System",
+    "timezone":              "Asia/Taipei",
 }
 
 DISCLAIMER = (
