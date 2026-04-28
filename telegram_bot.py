@@ -1,315 +1,510 @@
 """
-telegram_bot.py v5.2 — 直覺化推播，直接告訴你買進/賣出
+telegram_bot.py v5.5 — 修正版
+
+核心概念：城市交易員 / 手動下單輔助系統
+─────────────────────────────────────────
+系統角色：AI 分析師 → 你是操盤手
+系統做：掃描市場、計算訊號、發送明確進出場決策
+你做：看到訊號後，自己在 Mitrade 手動按買/賣
+
+每個 TG 訊息格式：
+  1. 進場訊號：明確告訴你「現在做多/空 XX」進場價、止損、止盈
+  2. 出場提醒：告訴你「XX 訊號觸及 TP1/SL，請平倉」
+  3. 摘要：每 30 分鐘一次環境概況（不是分數排行）
+
+修正：
+★ format_signal_message：完整進出場決策格式
+★ format_outcome_message：新增「請平倉」提醒
+★ format_scan_summary：移除無用分數排行，改為環境+當前持倉概況
+★ format_trump_alert：加入對應建議動作
+★ check_and_process_commands：新增 /status /positions /help 指令
 """
-import requests, logging
-from datetime import datetime, timezone
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DISCLAIMER
+import logging
+import os
+import requests
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
-TGAPI  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-def send_message(text, chat_id=None, parse_mode="HTML"):
-    if not TELEGRAM_BOT_TOKEN: return False
-    target=chat_id or TELEGRAM_CHAT_ID
-    if not target: return False
-    if len(text)>4000: text=text[:3990]+"..."
-    try:
-        r=requests.post(f"{TGAPI}/sendMessage",
-            json={"chat_id":target,"text":text,"parse_mode":parse_mode,
-                  "disable_web_page_preview":True},timeout=10)
-        return r.status_code==200
-    except Exception as e:
-        logger.error(f"Telegram send: {e}"); return False
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
+_last_update_id    = 0
 
-def _urgency(score, ai_rec):
-    if score>=85 and ai_rec=="進場": return "🔥 立刻行動","現在就可以下單"
-    if score>=75: return "✅ 進場訊號","條件齊備，可以進場"
-    if score>=65: return "👀 待確認","等下一根K線確認"
-    return "📋 觀察中","尚未達進場條件"
 
-def format_signal_message(s):
-    dir_    = s.get("direction","buy"); is_buy=dir_=="buy"
-    score   = int(s.get("score",0))
-    name    = s.get("name",s.get("symbol",""))
-    emoji   = s.get("emoji","📊"); symbol=s.get("symbol","")
-    entry   = s.get("entry_price",0); sl=s.get("stop_loss",0)
-    tp1     = s.get("tp1",0); tp2=s.get("tp2",0); rr1=s.get("rr1",1.5)
-    lot     = s.get("suggested_lot",0.01); risk_pct=s.get("risk_pct",2.0)
-    risk_usd= s.get("risk_usd",0); ai_rec=s.get("ai_recommendation","")
-    ai_rsn  = s.get("ai_reason",""); tf=s.get("timeframe","")
-    conds   = s.get("conditions_met",[]); warnings=s.get("risk_warnings",[])
-    costs   = s.get("trading_costs",{}); swap=costs.get("swap_per_day",0)
-    gen_time= datetime.now(timezone.utc).strftime("%m/%d %H:%M")
-    urgency_title,urgency_sub=_urgency(score,ai_rec)
-    action_line=(f"📈 <b>買進 BUY — {emoji} {name}</b>" if is_buy else f"📉 <b>賣出 SELL — {emoji} {name}</b>")
-    sl_pct=round(abs(entry-sl)/entry*100,2) if entry else 0
-    tp1_pct=round(abs(tp1-entry)/entry*100,2) if entry else 0
-    tp2_pct=round(abs(tp2-entry)/entry*100,2) if entry else 0
-    outcome=f"賺 {tp1_pct}% 或虧 {sl_pct}%，風險報酬 1:{rr1}"
-    ai_line=""
-    if ai_rec:
-        ai_icon={"進場":"✅","等待":"⏳","跳過":"❌"}.get(ai_rec,"—")
-        ai_line=f"\n🤖 AI建議：{ai_icon} <b>{ai_rec}</b>"
-        if ai_rsn: ai_line+=f"  {ai_rsn}"
-    cond_str="  "+"、".join(conds[:3]) if conds else "  分析中"
-    warn_str="".join(f"\n⚠️ {w}" for w in warnings[:1])
+def _send(text: str, parse_mode: str = "HTML") -> bool:
+    """底層發送，失敗時重試一次"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("[TG] 未設定 BOT_TOKEN 或 CHAT_ID，跳過發送")
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for attempt in range(2):
+        try:
+            r = requests.post(url, json={
+                "chat_id":    TELEGRAM_CHAT_ID,
+                "text":       text,
+                "parse_mode": parse_mode,
+            }, timeout=10)
+            if r.status_code == 200:
+                return True
+            logger.warning(f"[TG] 發送失敗 {r.status_code}: {r.text[:100]}")
+        except Exception as e:
+            logger.error(f"[TG] 發送例外 (attempt {attempt+1}): {e}")
+    return False
 
-    return f"""{urgency_title}  <b>{urgency_sub}</b>
 
-{action_line}
-━━━━━━━━━━━━━━
+# ════════════════════════════════════════════════════════
+# 進場訊號 — 最重要的訊息，讓你知道「現在去哪裡下單」
+# ════════════════════════════════════════════════════════
+def format_signal_message(sig: dict) -> str:
+    """
+    城市交易員版進場訊號
+    格式：你打開 Mitrade → 找到品種 → 按照這個訊息下單
+    """
+    direction  = sig.get("direction", "buy")
+    symbol     = sig.get("symbol", "")
+    name       = sig.get("name", symbol)
+    emoji      = sig.get("emoji", "📊")
+    score      = sig.get("score", 0)
+    entry      = sig.get("entry_price", 0)
+    sl         = sig.get("stop_loss",  0)
+    tp1        = sig.get("tp1", 0)
+    tp2        = sig.get("tp2", 0)
+    rr1        = sig.get("rr1", 0)
+    rr2        = sig.get("rr2", 0)
+    lot        = sig.get("suggested_lot", 0)
+    risk_pct   = sig.get("risk_pct", 0)
+    sl_pips    = sig.get("sl_pips", 0)
+    expires_at = sig.get("expires_at", "")
+    ai_rec     = sig.get("ai_recommendation", "")
+    conds      = sig.get("conditions_met", [])
+    action     = sig.get("action", "")
+    margin_pct = sig.get("margin_pct", 0)
+    lev        = sig.get("recommended_leverage", 30)
+    risk_usd   = sig.get("risk_usd", 0)
 
-🎯 <b>現在要做什麼</b>
-→ {'在 Mitrade 搜尋 '+symbol+'，點 Buy' if is_buy else '在 Mitrade 搜尋 '+symbol+'，點 Sell'}
-→ 進場價：<code>{entry}</code>
-→ 止損（認輸點）：<code>{sl}</code>  <b>-{sl_pct}%</b>
-→ 止盈1（獲利目標）：<code>{tp1}</code>  <b>+{tp1_pct}%</b>
-→ 止盈2（延伸目標）：<code>{tp2}</code>  <b>+{tp2_pct}%</b>
+    dir_zh = "🟢 做多（BUY）" if direction == "buy" else "🔴 做空（SELL）"
+    dir_arrow = "▲" if direction == "buy" else "▼"
 
-💰 <b>這筆交易的代價</b>
-→ 下單 <b>{lot} 手</b>
-→ 最多虧 <b>${risk_usd:.0f}</b>（佔帳戶 {risk_pct}%）
-→ {outcome}
-→ 過夜費：${swap:.2f}/天{ai_line}
+    # 有效期剩餘
+    exp_str = ""
+    if expires_at:
+        try:
+            diff = datetime.fromisoformat(expires_at) - datetime.now(timezone.utc)
+            mins = int(diff.total_seconds() / 60)
+            exp_str = f"⏳ 有效期：{mins} 分鐘內進場"
+        except Exception:
+            exp_str = "⏳ 有效期：60 分鐘"
 
-📌 <b>為什麼現在進場</b>
-{cond_str}
-時框：{tf}{warn_str}
+    # 信心等級
+    if score >= 85:
+        conf = "🔥 極強（立刻進場）"
+    elif score >= 75:
+        conf = "✅ 強（可以進場）"
+    elif score >= 65:
+        conf = "⚡ 中（等待確認）"
+    else:
+        conf = "👀 弱（僅觀察）"
 
-⏰ {gen_time} UTC
-<i>僅供參考，盈虧自負</i>""".strip()
+    # 條件摘要（最多 3 條）
+    cond_str = ""
+    if conds:
+        cond_str = "\n".join([f"  ✓ {c}" for c in conds[:3]])
+        cond_str = f"\n📋 共振條件：\n{cond_str}"
 
-def format_trump_alert(post):
-    level=post.get("impact_level","low"); assets=post.get("affected_assets",[])
-    interp=post.get("ai_interpretation",""); market=post.get("market_impact","neutral")
-    detail=post.get("market_impact_detail",{}); topic=post.get("topic","")
-    src=post.get("source","Truth Social")
-    level_icon={"high":"🚨","medium":"⚠️","low":"ℹ️"}.get(level,"⚠️")
-    market_icon={"bullish":"📈","bearish":"📉","neutral":"➡️"}.get(market,"➡️")
-    impact_str=""
-    if detail:
-        for sym,effect in list(detail.items())[:5]:
-            color="🟢" if "多" in effect or "↑" in effect else "🔴" if "空" in effect or "↓" in effect else "⚪"
-            impact_str+=f"  {color} {sym}：{effect}\n"
-    elif assets:
-        impact_str="  "+"  ".join(assets[:5])
-    return f"""{level_icon} <b>川普重大發文</b>  [{level.upper()}]
+    lines = [
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"📡 <b>訊號 | {emoji} {name}</b>",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"",
+        f"方向：<b>{dir_zh}</b>",
+        f"信心：{conf}（{score:.0f}/100）",
+        f"",
+        f"🎯 <b>下單參數（在 Mitrade 輸入）</b>",
+        f"進場價：<code>{_fp(entry)}</code>（市價附近）",
+        f"止損：<code>{_fp(sl)}</code>  （{sl_pips:.0f} pips）",
+        f"止盈1：<code>{_fp(tp1)}</code>  （RR 1:{rr1}）",
+        f"止盈2：<code>{_fp(tp2)}</code>  （RR 1:{rr2}）",
+        f"",
+        f"💰 <b>資金管理</b>",
+        f"建議手數：<b>{lot}</b> 手",
+        f"建議槓桿：<b>{lev}x</b>",
+        f"風險金額：${risk_usd:.2f}（帳戶 {risk_pct:.1f}%）",
+        f"保證金佔用：約 {margin_pct:.1f}%",
+        f"",
+        f"{exp_str}",
+        cond_str,
+    ]
 
-📢 <b>{topic.upper() if topic else '市場相關'}</b> · {src}
-{market_icon} 市場情緒：<b>{'偏多' if market=='bullish' else '偏空' if market=='bearish' else '中性'}</b>
+    if ai_rec and ai_rec != "等待":
+        lines.append(f"\n🤖 AI 建議：{ai_rec}")
 
-💬 <b>AI 解讀</b>
-{interp}
+    lines += [
+        f"",
+        f"⚠️ 此為輔助訊號，請自行判斷後在 Mitrade 手動下單",
+        f"━━━━━━━━━━━━━━━━━━━━",
+    ]
 
-📊 <b>受影響品種</b>
-{impact_str.strip()}
+    return "\n".join(l for l in lines if l is not None)
 
-━━━━━━━━━━━━━━
-⚠️ AI 解讀僅供參考
-⏰ {datetime.now(timezone.utc).strftime("%m/%d %H:%M")} UTC"""
 
-def format_briefing_message(b):
-    if not b or not b.get("ai_available"): return "📊 每日簡報生成中..."
-    env=b.get("overall_environment","謹慎交易"); reason=b.get("environment_reason","")
-    opps=b.get("best_opportunities",[]); avoid=b.get("avoid_today",[])
-    risk=b.get("top_risk_today",""); trump=b.get("trump_impact","")
-    session=b.get("session_advice",{})
-    env_icon={"適合交易":"🟢","謹慎交易":"🟡","今日觀望":"🔴"}.get(env,"🟡")
-    opp_str="\n".join([f"  ✅ {o}" for o in opps[:4]]) if opps else "  暫無明確機會"
-    avoid_str="\n".join([f"  ❌ {a}" for a in avoid[:3]]) if avoid else "  無"
-    sess_str=""
-    for s_name,s_key in [("亞洲","asia"),("倫敦","london"),("紐約","newyork")]:
-        adv=session.get(s_key,"")
-        if adv: sess_str+=f"  <b>{s_name}盤</b>：{adv}\n"
-    return f"""📊 <b>每日市場簡報</b>  {datetime.now(timezone.utc).strftime("%Y/%m/%d")}
-{'━'*24}
+# ════════════════════════════════════════════════════════
+# 出場提醒 — 告訴你「現在去平倉」
+# ════════════════════════════════════════════════════════
+def format_outcome_message(sig: dict) -> str:
+    """
+    ★ 新增：結算通知
+    讓你知道：這個倉位已觸及 TP 或 SL，現在去 Mitrade 確認平倉
+    """
+    result    = sig.get("result", "")
+    symbol    = sig.get("symbol", "")
+    name      = sig.get("name", symbol)
+    emoji     = sig.get("emoji", "📊")
+    direction = sig.get("direction", "buy")
+    entry     = sig.get("entry_price", 0)
+    close_px  = sig.get("close_price", 0)
+    pnl       = sig.get("pnl", 0)
+    pnl_pips  = sig.get("pnl_pips", 0)
+    lot       = sig.get("suggested_lot", 0)
+    dir_zh    = "做多" if direction == "buy" else "做空"
 
-{env_icon} <b>{env}</b>
-{reason}
+    if result == "tp1":
+        header = f"🎯 止盈1達成！{emoji} {name}"
+        action = "✅ 請到 Mitrade 確認倉位已平倉（或移動止損至 TP1 保本）"
+        pnl_str = f"+${pnl:.2f}"
+    elif result == "tp2":
+        header = f"🏆 止盈2達成！{emoji} {name}"
+        action = "✅ 請到 Mitrade 平倉獲利了結"
+        pnl_str = f"+${pnl:.2f}"
+    elif result == "sl":
+        header = f"❌ 觸及止損 {emoji} {name}"
+        action = "⛔ 請確認 Mitrade 止損單已執行，倉位已平倉"
+        pnl_str = f"${pnl:.2f}"
+    elif result == "expired":
+        header = f"⌛ 訊號到期 {emoji} {name}"
+        action = "📌 訊號已過期。若您有持倉，請根據當前市況自行決定是否平倉"
+        pnl_str = f"${pnl:+.2f}（浮動估算）"
+    else:
+        return ""
 
-📈 <b>今日機會</b>
-{opp_str}
+    return (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{header}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"\n"
+        f"方向：{dir_zh}  |  手數：{lot}\n"
+        f"進場：<code>{_fp(entry)}</code> → 結算：<code>{_fp(close_px)}</code>\n"
+        f"損益：<b>{pnl_str}</b>（{pnl_pips:+.1f} pips）\n"
+        f"\n"
+        f"📲 <b>行動：{action}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
 
-📉 <b>今日避開</b>
-{avoid_str}
 
-🔥 <b>最大風險</b>  {risk}
-⚡ <b>川普因素</b>  {trump if trump else '無重大發文'}
+# ════════════════════════════════════════════════════════
+# 掃描摘要 — 每 30 分鐘，環境概況 + 當前有效訊號
+# ════════════════════════════════════════════════════════
+def format_scan_summary(scan_num: int, new_signals: list, active_count: int,
+                        scores: dict, session: str, vix, regime_zh: str,
+                        win_rate: float = 0) -> str:
+    """
+    ★ 修正：移除純分數排行，改為「當前有效訊號一覽」
+    讓你一眼看到現在有哪些倉位可以進場
+    """
+    now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
-⏰ <b>各時段建議</b>
-{sess_str.strip()}
+    # 環境評估
+    vix_f = float(vix) if vix and str(vix).replace('.','').isdigit() else 0
+    env_str = "🟢 適合交易" if vix_f < 20 else "🟡 謹慎操作" if vix_f < 30 else "🔴 高波動注意"
 
-━━━━━━━━━━━━━━
-<i>{DISCLAIMER[:55]}...</i>""".strip()
+    lines = [
+        f"📊 <b>第 {scan_num} 次掃描摘要</b> | {now_str}",
+        f"",
+        f"⏰ 時段：{session}",
+        f"🌡 VIX：{vix}  |  市場：{regime_zh}",
+        f"環境：{env_str}",
+        f"勝率：{win_rate:.1f}%（歷史）",
+        f"",
+    ]
 
-def format_alert_message(title, body, level="warning"):
-    icons={"danger":"🚨","warning":"⚠️","info":"ℹ️","earnings":"📅","trump":"⚡","success":"✅"}
-    border={"danger":"━","warning":"─","info":"·"}.get(level,"─")*24
-    return f"{icons.get(level,'⚠️')} <b>{title}</b>\n{border}\n\n{body}\n\n⏰ {datetime.now(timezone.utc).strftime('%m/%d %H:%M UTC')}"
+    if new_signals:
+        lines.append(f"🆕 <b>本次新訊號（{len(new_signals)} 個）</b>")
+        for s in new_signals[:5]:
+            d   = "▲ BUY" if s.get("direction") == "buy" else "▼ SELL"
+            sc  = s.get("score", 0)
+            act = s.get("action", "")
+            lines.append(
+                f"  {s.get('emoji','📊')} {s.get('symbol','')} "
+                f"{d} | 評分 {sc:.0f} | {act}"
+            )
+    else:
+        lines.append("💤 本次無新訊號")
 
-def format_scan_summary(scan_num, new_signals, active_count, scores, session, vix, regime_zh, win_rate):
-    now=datetime.now(timezone.utc).strftime("%H:%M UTC")
-    top=sorted(scores.items(),key=lambda x:x[1],reverse=True)[:5]
-    medals=["🥇","🥈","🥉","4️⃣","5️⃣"]
-    ranking="".join(f"  {medals[i]} {sym:8s} {sc:.0f}\n" for i,(sym,sc) in enumerate(top))
-    sig_str="".join(f"  {'🟢' if s.get('direction')=='buy' else '🔴'} {s.get('emoji','')} {s.get('name','')[:10]} · {s.get('score',0):.0f}分\n" for s in new_signals[:3])
-    has_signal_line=(f"🎯 <b>{len(new_signals)} 個新訊號！</b>\n{sig_str.strip()}" if new_signals else "⏳ 等待共振中，耐心持有")
-    vix_icon="🔴" if float(vix or 20)>=30 else "🟡" if float(vix or 20)>=20 else "🟢"
-    return f"""📡 <b>掃描 #{scan_num} 完成</b>  {now}
-━━━━━━━━━━━━━━
+    lines.append("")
 
-{has_signal_line}
+    if active_count > 0:
+        lines.append(f"📡 <b>當前有效訊號：{active_count} 個</b>（可進場）")
+        lines.append("發送 /positions 查看完整進出場參數")
+    else:
+        lines.append("📭 目前無有效訊號")
 
-📊 <b>品種分數排行</b>
-{ranking.strip()}
-
-🌐 <b>市場狀態</b>
-  時段：{session}
-  VIX：{vix_icon} {vix}  機制：{regime_zh}
-  勝率：{win_rate:.1f}%  有效訊號：{active_count}
-
-━━━━━━━━━━━━━━
-輸入 /signals 查看詳細訊號"""
-
-def format_stats_message(state):
-    log=list(reversed(getattr(state,"signal_log",[])[:50]))
-    if not log: return "📊 <b>訊號統計</b>\n\n尚無歷史記錄"
-    tp=len([s for s in log if s.get("result") in ["tp1","tp2"]])
-    sl=len([s for s in log if s.get("result")=="sl"])
-    pen=len([s for s in log if s.get("result")=="pending"])
-    tot=tp+sl; wr=round(tp/tot*100,1) if tot>0 else 0
-    sym_stats={}
-    for s in log:
-        sym=s.get("symbol","")
-        if sym not in sym_stats: sym_stats[sym]={"w":0,"l":0}
-        if s.get("result") in ["tp1","tp2"]: sym_stats[sym]["w"]+=1
-        elif s.get("result")=="sl": sym_stats[sym]["l"]+=1
-    best=max(sym_stats.items(),key=lambda x:x[1]["w"]/(x[1]["w"]+x[1]["l"]) if x[1]["w"]+x[1]["l"]>0 else 0,default=(None,{}))
-    wr_line=f"✅ 止盈 {tp} 次  ❌ 止損 {sl} 次  ⏳ 待定 {pen} 次\n勝率 <b>{wr}%</b>"
-    return f"""📊 <b>訊號統計報告</b>
-━━━━━━━━━━━━━━
-
-{wr_line}
-🏆 最佳品種：{best[0] or '—'}
-🔄 掃描次數：{getattr(state,'scan_count',0)}
-
-━━━━━━━━━━━━━━
-<i>⚠️ 過去表現不代表未來結果</i>"""
-
-def format_history_message(state, limit=10):
-    log=list(reversed(getattr(state,"signal_log",[])))[:limit]
-    if not log: return "📋 <b>歷史訊號</b>\n\n尚無記錄"
-    rm={"tp1":"✅","tp2":"✅","sl":"❌","pending":"⏳","expired":"⏸"}
-    lines=["📋 <b>最近訊號</b>\n"]
-    for s in log:
-        d="🟢" if s.get("direction")=="buy" else "🔴"
-        ri=rm.get(s.get("result","pending"),"⏳")
-        date=(s.get("generated","")[:10] if s.get("generated") else "—")
-        lines.append(f"{d} {ri} {s.get('symbol',''):8s} {s.get('score',0):.0f}分  {date}")
     return "\n".join(lines)
 
-def get_updates(offset=None):
+
+# ════════════════════════════════════════════════════════
+# 川普動態 — 加入建議動作
+# ════════════════════════════════════════════════════════
+def format_trump_alert(post: dict) -> str:
+    impact    = post.get("impact_level", "medium")
+    mood      = post.get("market_impact", "neutral")
+    assets    = post.get("affected_assets", [])
+    interp    = post.get("ai_interpretation", post.get("original_text", ""))
+    event_type= post.get("event_type", "")
+
+    mood_str = "📈 市場偏多" if mood == "bullish" else "📉 市場偏空" if mood == "bearish" else "➡️ 影響中性"
+    imp_str  = "🚨 高影響" if impact == "high" else "⚡ 中影響" if impact == "medium" else "ℹ️ 低影響"
+
+    # 建議動作
+    if mood == "bullish" and impact == "high":
+        suggestion = "建議：留意 BTC/黃金/指數做多機會，等待下次掃描確認"
+    elif mood == "bearish" and impact == "high":
+        suggestion = "建議：避免新進多單，留意做空機會，提高警惕"
+    else:
+        suggestion = "建議：暫時觀察，等待市場消化此消息"
+
+    assets_str = "、".join(assets[:5]) if assets else "待確認"
+
+    return (
+        f"📢 <b>川普發文 | {imp_str}</b>\n"
+        f"\n"
+        f"AI 解讀：{interp[:200]}\n"
+        f"\n"
+        f"市場影響：{mood_str}\n"
+        f"影響品種：{assets_str}\n"
+        f"\n"
+        f"💡 {suggestion}\n"
+        f"（下次掃描將自動調整評分）"
+    )
+
+
+# ════════════════════════════════════════════════════════
+# 每日簡報
+# ════════════════════════════════════════════════════════
+def format_briefing_message(briefing: dict) -> str:
+    env     = briefing.get("overall_environment", "—")
+    reason  = briefing.get("environment_reason",  "—")
+    best    = briefing.get("best_opportunities",  [])
+    avoid   = briefing.get("avoid_today",         [])
+    risk    = briefing.get("top_risk_today",       "")
+    trump   = briefing.get("trump_impact",         "")
+    date    = briefing.get("generated_at", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+
+    best_str  = "、".join(best[:4])  if best  else "暫無"
+    avoid_str = "、".join(avoid[:3]) if avoid else "無"
+
+    lines = [
+        f"📅 <b>每日市場簡報 | {date}</b>",
+        f"",
+        f"🌍 整體環境：<b>{env}</b>",
+        f"原因：{reason}",
+        f"",
+        f"✅ 今日最佳品種：{best_str}",
+        f"⛔ 今日避開：{avoid_str}",
+    ]
+    if risk:
+        lines.append(f"⚠️ 主要風險：{risk}")
+    if trump:
+        lines.append(f"🇺🇸 川普因素：{trump}")
+    lines += [
+        f"",
+        f"🕐 系統每 5 分鐘掃描一次，有訊號時即時通知",
+        f"輸入 /help 查看所有指令",
+    ]
+    return "\n".join(lines)
+
+
+# ════════════════════════════════════════════════════════
+# 一般警報
+# ════════════════════════════════════════════════════════
+def format_alert_message(title: str, body: str, alert_type: str = "info") -> str:
+    icons = {"earnings": "📅", "vix": "🚨", "info": "ℹ️", "warning": "⚠️"}
+    icon  = icons.get(alert_type, "ℹ️")
+    return f"{icon} <b>{title}</b>\n\n{body}"
+
+
+# ════════════════════════════════════════════════════════
+# 指令處理 — /help /status /positions /stats
+# ════════════════════════════════════════════════════════
+def check_and_process_commands(state) -> None:
+    """處理 Telegram 指令，每 10 秒輪詢一次"""
+    global _last_update_id
+    if not TELEGRAM_BOT_TOKEN:
+        return
     try:
-        params={"timeout":1}
-        if offset: params["offset"]=offset
-        r=requests.get(f"{TGAPI}/getUpdates",params=params,timeout=5)
-        if r.status_code==200: return r.json().get("result",[])
-    except: pass
-    return []
-
-def process_command(text, state):
-    cmd=text.strip().lower().split()[0] if text.strip() else ""
-    snap=state.get_snapshot()
-    if cmd in ["/status","狀態"]:
-        ss=snap.get("system_status",{}); ses=snap.get("market_session",{})
-        dl=ss.get("daily_loss",{}); sigs=snap.get("active_signals",[])
-        perf=snap.get("performance",{}); regime=snap.get("regime",{})
-        vix=ss.get("vix",0); vix_icon="🔴" if float(vix or 0)>=30 else "🟡" if float(vix or 0)>=20 else "🟢"
-        env_icon={"適合交易":"🟢","謹慎交易":"🟡","今日觀望":"🔴"}.get(ss.get("env_status",""),"⚪")
-        sig_lines="".join(f"  {'🟢' if s.get('direction')=='buy' else '🔴'} {s.get('emoji','')} {s.get('name','')[:10]} {s.get('score',0):.0f}分\n" for s in sigs[:3])
-        return f"""🖥️ <b>系統狀態</b>
-━━━━━━━━━━━━━━
-{env_icon} <b>{ss.get('env_status','—')}</b>  {snap.get('version','')}
-⏰ {ses.get('taiwan_time','—')}  {ses.get('session_zh','—')}
-🌐 機制：{regime.get('regime_zh','—')}
-{vix_icon} VIX：{vix}  F&G：{ss.get('fg_score',50)}/100
-
-📈 訊號：<b>{len(sigs)}</b> 個有效
-{sig_lines.strip()}
-
-💰 今日風險：${dl.get('today_loss',0):.0f} / ${dl.get('max_loss',0):.0f}
-📊 Sharpe：{perf.get('sharpe','—')}  MaxDD：{perf.get('max_drawdown','—')}%
-🔄 掃描：#{snap.get('scan_count',0)}"""
-
-    elif cmd in ["/signals","訊號"]:
-        sigs=snap.get("active_signals",[])
-        if not sigs: return "📭 <b>目前無訊號</b>\n\n系統每15分鐘自動掃描"
-        lines=[f"📋 <b>當前訊號 ({len(sigs)}個)</b>\n"]
-        for s in sigs[:6]:
-            is_buy=s.get("direction")=="buy"; act="📈 買進" if is_buy else "📉 賣出"
-            entry=s.get("entry_price",0); sl=s.get("stop_loss",0); tp1=s.get("tp1",0); rr1=s.get("rr1",1.5)
-            ai=s.get("ai_recommendation",""); ai_tag=f"  AI {ai}" if ai else ""
-            lines.append(f"{act} <b>{s.get('emoji','')} {s.get('name','')[:12]}</b>{ai_tag}\n   進 <code>{entry}</code>  損 <code>{sl}</code>  盈 <code>{tp1}</code>  1:{rr1}")
-        return "\n".join(lines)
-
-    elif cmd in ["/macro","宏觀"]:
-        m=snap.get("macro_data",{}); fred=snap.get("fred_data",{}); fg=m.get("fear_greed",{}); dq=m.get("data_quality",{})
-        return f"""🌍 <b>宏觀數據</b>
-━━━━━━━━━━━━━━
-😱 VIX：{m.get('vix',{}).get('price','—')}
-💵 DXY：{m.get('dxy',{}).get('price','—')}
-💭 F&G：{fg.get('score','—')}/100 {fg.get('label_zh','')}
-🥇 黃金：{m.get('gold',{}).get('price','—')}
-₿  BTC：{m.get('btc',{}).get('price','—')}
-🏦 Fed：{fred.get('fed_rate',{}).get('value','—')}%
-📉 殖利率：{fred.get('yield_curve',{}).get('label_zh','—')}
-
-📡 數據品質：{dq.get('quality_pct',0)}% ({dq.get('filled_sources',0)}/{dq.get('total_sources',6)} 來源)"""
-
-    elif cmd in ["/history","歷史"]: return format_history_message(state)
-    elif cmd in ["/stats","統計"]:   return format_stats_message(state)
-
-    elif cmd in ["/earnings","財報"]:
-        ec=snap.get("earnings_calendar",[])
-        if not ec: return "📅 未來7天無監控品種財報"
-        lines=["📅 <b>即將財報</b>\n"]
-        for e in ec[:6]: lines.append(f"📌 <b>{e.get('symbol','')}</b> {e.get('name','')[:8]}\n   {e.get('date','')} EPS預估：{e.get('eps_est','—')}")
-        return "\n".join(lines)
-
-    elif cmd in ["/futures","期貨"]:
-        fu=snap.get("us_futures_data",{})
-        if not fu: return "📈 數據載入中..."
-        lines=["📈 <b>美股期貨</b>\n"]
-        for sym,data in fu.items():
-            if sym=="overall": continue
-            chg=float(data.get("chg",0)); icon="🟢" if chg>0.1 else "🔴" if chg<-0.1 else "⚪"
-            lines.append(f"{icon} {data.get('name',sym)[:12]}  {chg:+.2f}%")
-        if fu.get("overall"): lines.append(f"\n→ {fu['overall']['label']}")
-        return "\n".join(lines)
-
-    elif cmd in ["/help","說明","幫助"]:
-        return """📖 <b>指令說明</b>
-━━━━━━━━━━━━━━
-/status   — 系統狀態總覽
-/signals  — 當前訊號
-/macro    — 宏觀數據
-/history  — 歷史訊號
-/stats    — 勝率統計
-/earnings — 財報日曆
-/futures  — 美股期貨
-/help     — 本說明"""
-
-    return "❓ 不認識這個指令\n輸入 /help 查看所有指令"
-
-def check_and_process_commands(state):
-    if not TELEGRAM_BOT_TOKEN: return
-    try:
-        updates=get_updates(offset=getattr(check_and_process_commands,"_offset",None))
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+        r   = requests.get(url, params={"offset": _last_update_id + 1, "timeout": 5}, timeout=8)
+        if r.status_code != 200:
+            return
+        updates = r.json().get("result", [])
         for upd in updates:
-            check_and_process_commands._offset=upd.get("update_id",0)+1
-            msg=upd.get("message",{}); text=msg.get("text","")
-            cid=str(msg.get("chat",{}).get("id",""))
-            if text and cid==str(TELEGRAM_CHAT_ID):
-                send_message(process_command(text,state),chat_id=cid)
+            _last_update_id = upd.get("update_id", _last_update_id)
+            msg  = upd.get("message", {})
+            text = msg.get("text", "").strip().lower()
+            chat_id = str(msg.get("chat", {}).get("id", ""))
+
+            # 只回應設定的 CHAT_ID
+            if chat_id != str(TELEGRAM_CHAT_ID):
+                continue
+
+            if text in ("/help", "help"):
+                _send(_cmd_help())
+
+            elif text in ("/status", "status"):
+                _send(_cmd_status(state))
+
+            elif text in ("/positions", "/pos", "positions"):
+                _send(_cmd_positions(state))
+
+            elif text in ("/stats", "stats"):
+                _send(_cmd_stats(state))
+
+            elif text in ("/scan", "scan"):
+                _send("⚡ 觸發強制掃描中，約 10-30 秒後通知結果…")
+                import threading
+                from app import run_scan
+                threading.Thread(target=run_scan, daemon=True).start()
+
+            elif text in ("/briefing", "briefing"):
+                b = state.daily_briefing
+                if b:
+                    _send(format_briefing_message(b))
+                else:
+                    _send("📭 今日簡報尚未生成")
+
+            elif text.startswith("/"):
+                _send(f"❓ 未知指令：{text}\n\n輸入 /help 查看所有指令")
+
     except Exception as e:
-        logger.error(f"Command error: {e}")
+        logger.debug(f"[TG] poll_commands: {e}")
+
+
+def _cmd_help() -> str:
+    return (
+        "🤖 <b>Mitrade AI 指令列表</b>\n"
+        "\n"
+        "/positions — 查看當前所有有效訊號（進場參數）\n"
+        "/status    — 系統狀態（環境分、時段、VIX）\n"
+        "/stats     — 歷史勝率與損益統計\n"
+        "/scan      — 立即觸發一次掃描\n"
+        "/briefing  — 查看今日市場簡報\n"
+        "/help      — 顯示此列表\n"
+        "\n"
+        "📌 系統說明：\n"
+        "• AI 掃描市場，發送進場訊號\n"
+        "• 你在 Mitrade 手動下單\n"
+        "• 觸及 TP/SL 時系統發送平倉提醒\n"
+        "• 所有訊號含進場價、止損、止盈"
+    )
+
+
+def _cmd_status(state) -> str:
+    sys   = state.system_status
+    sess  = state.market_session
+    macro = state.macro_data
+    vix   = macro.get("vix",  {}).get("price", "—")
+    fg    = macro.get("fear_greed", {}).get("score", "—")
+    now   = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    return (
+        f"📊 <b>系統狀態 | {now}</b>\n"
+        f"\n"
+        f"環境評分：{sys.get('env_score', 0)}/100\n"
+        f"狀態：{sys.get('env_status', '—')}\n"
+        f"時段：{sess.get('session_zh', '—')}\n"
+        f"市場機制：{state.regime.get('regime_zh', '—')}\n"
+        f"VIX：{vix}  |  恐懼貪婪：{fg}\n"
+        f"掃描次數：#{state.scan_count}\n"
+        f"上次掃描：{state.last_scan_time or '—'}\n"
+        f"有效訊號：{len(state.active_signals)} 個"
+    )
+
+
+def _cmd_positions(state) -> str:
+    """最重要的指令：顯示當前所有可進場訊號的完整參數"""
+    sigs = state.active_signals
+    if not sigs:
+        return (
+            "📭 <b>當前無有效訊號</b>\n"
+            "\n"
+            "系統每 5 分鐘掃描一次\n"
+            "有訊號時會自動推送\n"
+            "或輸入 /scan 觸發立即掃描"
+        )
+
+    lines = [f"📡 <b>當前有效訊號 ({len(sigs)} 個)</b>\n"]
+    for sig in sigs[:5]:
+        d      = "▲ BUY（做多）" if sig.get("direction") == "buy" else "▼ SELL（做空）"
+        symbol = sig.get("symbol", "")
+        name   = sig.get("name", symbol)
+        entry  = sig.get("entry_price", 0)
+        sl     = sig.get("stop_loss",  0)
+        tp1    = sig.get("tp1", 0)
+        tp2    = sig.get("tp2", 0)
+        rr1    = sig.get("rr1", 0)
+        lot    = sig.get("suggested_lot", 0)
+        score  = sig.get("score", 0)
+        action = sig.get("action", "")
+
+        # 有效期倒數
+        exp_str = ""
+        expires = sig.get("expires_at", "")
+        if expires:
+            try:
+                diff    = datetime.fromisoformat(expires) - datetime.now(timezone.utc)
+                mins    = max(0, int(diff.total_seconds() / 60))
+                exp_str = f"⏳ 剩 {mins} 分鐘"
+            except Exception:
+                pass
+
+        lines += [
+            f"━━━━━━━━━━━━━",
+            f"{sig.get('emoji','📊')} <b>{name}</b>  {d}",
+            f"評分：{score:.0f}/100  {action}  {exp_str}",
+            f"進場：<code>{_fp(entry)}</code>",
+            f"止損：<code>{_fp(sl)}</code>  止盈1：<code>{_fp(tp1)}</code>  (RR 1:{rr1})",
+            f"止盈2：<code>{_fp(tp2)}</code>  手數：{lot}",
+            f"",
+        ]
+
+    lines.append("⚠️ 以上訊號請自行在 Mitrade 手動下單")
+    return "\n".join(lines)
+
+
+def _cmd_stats(state) -> str:
+    wr = state.calc_win_rate()
+    return (
+        f"📈 <b>歷史績效統計</b>\n"
+        f"\n"
+        f"總交易：{wr.get('total', 0)} 筆\n"
+        f"獲利：{wr.get('wins', 0)} 筆  |  虧損：{wr.get('losses', 0)} 筆\n"
+        f"勝率：<b>{wr.get('win_rate', 0):.1f}%</b>\n"
+        f"\n"
+        f"💡 目標勝率：45–60%（RR 1.5 盈虧平衡 = 40%）\n"
+        f"⚠️ 數據來自系統訊號觸及 TP/SL 的真實記錄"
+    )
+
+
+# ════════════════════════════════════════════════════════
+# 工具函數
+# ════════════════════════════════════════════════════════
+def _fp(p) -> str:
+    """格式化價格"""
+    if not p:
+        return "—"
+    n = float(p)
+    if n > 10000:
+        return f"{n:.2f}"
+    if n > 100:
+        return f"{n:.3f}"
+    if n > 1:
+        return f"{n:.4f}"
+    return f"{n:.5f}"
