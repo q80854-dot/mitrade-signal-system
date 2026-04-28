@@ -346,13 +346,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',syste
 <!-- ══ PERFORMANCE ══ -->
 <div class="page" id="p-perf">
   <div style="font-size:13px;font-weight:700;color:var(--t1);margin-bottom:2px">績效分析</div>
+  <!-- 數據來源說明條 -->
+  <div style="background:var(--Gd);border:1px solid var(--Gb);border-radius:var(--r);padding:8px 12px;font-size:10px;color:var(--G);display:flex;align-items:center;gap:8px" id="perfSrcBar">
+    <span>✅</span>
+    <span id="perfSrcTxt">數據來源：SQLite 真實記錄 — 僅統計訊號實際觸及 TP1/TP2/SL 的結果，不含模擬數據</span>
+  </div>
   <div class="krow" id="perfKpis"></div>
   <div class="g2">
-    <div class="card"><div class="ct">資金曲線</div><div class="chw"><canvas id="eqCh"></canvas></div></div>
-    <div class="card"><div class="ct">逐筆損益</div><div class="chw"><canvas id="wlCh"></canvas></div></div>
+    <div class="card"><div class="ct">資金曲線 <span class="cbadge">真實損益累積</span></div><div class="chw"><canvas id="eqCh"></canvas></div></div>
+    <div class="card"><div class="ct">逐筆損益 <span class="cbadge">每筆 TP/SL 盈虧</span></div><div class="chw"><canvas id="wlCh"></canvas></div></div>
   </div>
   <div class="card">
-    <div class="ct">近期 20 筆交易 <span class="cbadge" id="perfStatBadge"></span></div>
+    <div class="ct">近期 20 筆交易（真實結算記錄）<span class="cbadge" id="perfStatBadge"></span></div>
     <div class="tsc">
       <table class="tbl">
         <thead><tr><th>品種</th><th>方向</th><th>進場</th><th>止損</th><th>TP1</th><th>SL pips</th><th>RR</th><th>結果</th><th>損益</th></tr></thead>
@@ -1028,6 +1033,11 @@ function renderPerf(d, p) {
   var wins  = +(real.wins!==undefined?real.wins:(stats.tp||0));
   var loss  = +(real.losses!==undefined?real.losses:(stats.sl||0));
   var pnl   = +(real.total_pnl||0), pf = +(real.profit_factor||0), dd = +(real.max_drawdown||0), sh = +(real.sharpe||0);
+  // 更新數據來源說明
+  var srcEl = document.getElementById('perfSrcTxt');
+  if (srcEl && real.note) srcEl.textContent = real.note;
+  var srcBar = document.getElementById('perfSrcBar');
+  if (srcBar) { srcBar.style.display = total > 0 ? 'flex' : 'none'; }
   setText('perfStatBadge', wr.toFixed(1)+'% · ' + wins+'W '+loss+'L');
   setHTML('perfKpis',
     kc('🎯',wr.toFixed(1)+'%','勝率',wins+'W · '+loss+'L',wr>=50?'g':'r')+
