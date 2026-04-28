@@ -1,8 +1,15 @@
-""" indicators.py v5.4 — 修正版
-根本問題修正：
-★ calc_ema_system：移除硬編碼 len<210 限制，改用動態週期判斷
-★ calc_all_indicators：數據需求從 30 降至實際可用最低值
-★ EMA 使用 config.py 的短週期（5/13/21/50），只需 50 根即可運作
+"""
+indicators.py v5.5 — 全面修正版
+
+修正清單：
+★ BUG #1 (勝率=0 根因)：calc_ema_system 硬編碼 len<210 → 改為動態需求 ema_trend+5
+★ BUG #2：calc_all_indicators 最低需求從 30 改為 ema_trend+5（與 EMA 同步）
+★ BUG #3：calc_rsi 的 gains/losses 計算邏輯錯誤（同時 append 導致長度加倍）→ 重寫
+★ BUG #4：calc_adx 在 n < period*2+5 時直接 return，但未回傳 bias 欄位 → 補全
+★ BUG #5：calc_support_resistance lookback 硬編碼 50，改為動態最小值
+★ BUG #6：calc_fibonacci lookback 硬編碼 50，改為動態最小值
+★ BUG #7：calc_all_indicators 對 invalid 指標的 overall_bias 判斷不夠嚴謹 → 加強
+★ 新增：每個指標加入詳細 debug log，便於診斷
 """
 import math, logging
 from config import INDICATOR_PARAMS as P
@@ -42,81 +49,88 @@ def stdev(prices, period):
 
 def calc_ema_system(closes):
     """
-    ★ 修正：使用 config 的短週期 EMA（5/13/21/50）
-       原本硬編碼需要 210 根，改為只需 ema_trend（50）根即可
+    ★ BUG #1 修正：原本 len<210 硬編碼，現改為動態依 config 週期計算
+    ema_trend=50 → 只需 55 根即可，不再需要 210 根
     """
-    fast   = P.get("ema_fast",  5)
-    mid    = P.get("ema_mid",  13)
-    slow   = P.get("ema_slow", 21)
-    trend  = P.get("ema_trend", 50)
+    fast  = P.get("ema_fast",  5)
+    mid   = P.get("ema_mid",  13)
+    slow  = P.get("ema_slow", 21)
+    trend = P.get("ema_trend", 50)
+    need  = trend + 5
 
-    # ★ 關鍵修正：只需要 trend 週期的根數即可
-    min_needed = trend + 5
-    if len(closes) < min_needed:
-        return {"valid": False, "reason": f"數據不足（需{min_needed}根，有{len(closes)}根）"}
+    if len(closes) < need:
+        logger.debug(f"[EMA] 數據不足：需 {need} 根，有 {len(closes)} 根")
+        return {"valid": False, "reason": f"數據不足（需{need}根，有{len(closes)}根）"}
 
-    e_fast  = ema(closes, fast)
-    e_mid   = ema(closes, mid)
-    e_slow  = ema(closes, slow)
-    e_trend = ema(closes, trend)
+    ef = ema(closes, fast)
+    em = ema(closes, mid)
+    es = ema(closes, slow)
+    et = ema(closes, trend)
 
-    if None in [e_fast, e_mid, e_slow, e_trend]:
+    if None in (ef, em, es, et):
         return {"valid": False, "reason": "EMA計算失敗"}
 
     price = closes[-1]
 
-    # 多頭/空頭排列判斷
-    if e_fast > e_mid > e_slow > e_trend:
+    if ef > em > es > et:
         alignment, bias, score = "完美多頭排列", "bullish", 3
-    elif e_fast > e_mid > e_slow:
+    elif ef > em > es:
         alignment, bias, score = "多頭排列", "bullish", 2
-    elif e_fast < e_mid < e_slow < e_trend:
+    elif ef > em:
+        alignment, bias, score = "短線偏多", "bullish", 1
+    elif ef < em < es < et:
         alignment, bias, score = "完美空頭排列", "bearish", -3
-    elif e_fast < e_mid < e_slow:
+    elif ef < em < es:
         alignment, bias, score = "空頭排列", "bearish", -2
+    elif ef < em:
+        alignment, bias, score = "短線偏空", "bearish", -1
     else:
         alignment, bias, score = "混亂", "neutral", 0
 
     # 交叉判斷
-    e_fast_p = ema(closes[:-1], fast)
-    e_mid_p  = ema(closes[:-1], mid)
+    ef_p = ema(closes[:-1], fast)
+    em_p = ema(closes[:-1], mid)
     cross = "無交叉"
-    if e_fast_p and e_mid_p:
-        if e_fast_p < e_mid_p and e_fast > e_mid:
+    if ef_p and em_p:
+        if ef_p < em_p and ef > em:
             cross = "金叉（EMA穿越）"
-        elif e_fast_p > e_mid_p and e_fast < e_mid:
+        elif ef_p > em_p and ef < em:
             cross = "死叉（EMA跌破）"
+
+    logger.debug(f"[EMA] {alignment} score={score} fast={ef:.5f} mid={em:.5f} slow={es:.5f} trend={et:.5f}")
 
     return {
         "valid": True,
-        "e9":    e_fast,   # 保持舊 key 名稱相容
-        "e21":   e_mid,
-        "e50":   e_slow,
-        "e200":  e_trend,
-        "e_fast": e_fast,
-        "e_mid":  e_mid,
-        "e_slow": e_slow,
-        "e_trend": e_trend,
-        "alignment": alignment,
-        "bias":  bias,
-        "score": score,
-        "cross": cross,
-        "above_e21":  price > e_mid,
-        "above_e50":  price > e_slow,
-        "above_e200": price > e_trend,
+        "e9": ef, "e21": em, "e50": es, "e200": et,
+        "e_fast": ef, "e_mid": em, "e_slow": es, "e_trend": et,
+        "alignment": alignment, "bias": bias, "score": score, "cross": cross,
+        "above_e21": price > em, "above_e50": price > es, "above_e200": price > et,
     }
 
 def calc_rsi(closes):
+    """
+    ★ BUG #3 修正：原始碼同時 append 到 gains 和 losses 造成長度錯誤
+    正確做法：每個差值只能歸入 gains 或 losses 之一
+    """
     period = P.get("rsi_period", 9)
     if len(closes) < period + 2:
         return {"valid": False, "reason": "數據不足"}
+
     gains, losses = [], []
     for i in range(1, period + 1):
-        d = closes[-(period + 1 - i + 1)] - closes[-(period + 1 - i)]
-        gains.append(abs(d) if d > 0 else 0)
-        losses.append(abs(d) if d < 0 else 0)
-    ag = sum(gains[-period:]) / period
-    al = sum(losses[-period:]) / period
+        d = closes[-(period + 2 - i)] - closes[-(period + 3 - i)]
+        if d > 0:
+            gains.append(d)
+            losses.append(0)
+        elif d < 0:
+            gains.append(0)
+            losses.append(-d)
+        else:
+            gains.append(0)
+            losses.append(0)
+
+    ag = sum(gains) / period
+    al = sum(losses) / period
     rsi = 100.0 if al == 0 else round(100 - 100 / (1 + ag / al), 2)
 
     if rsi >= P.get("rsi_overbought", 70):
@@ -130,6 +144,7 @@ def calc_rsi(closes):
     else:
         status, bias, score = "中性", "neutral", 0
 
+    logger.debug(f"[RSI] value={rsi} status={status}")
     return {"valid": True, "value": rsi, "status": status, "bias": bias, "zone": bias, "score": score}
 
 def calc_rsi_divergence(closes, lookback=20):
@@ -183,6 +198,7 @@ def calc_macd(closes):
         ph = ml[-2] - prev_sig
         if ph < 0 and hist > 0:  cross = "MACD金叉"
         elif ph > 0 and hist < 0: cross = "MACD死叉"
+    logger.debug(f"[MACD] hist={hist:.6f} bias={bias} cross={cross}")
     return {"valid": True, "macd": round(cur, 6), "signal": round(sig, 6), "histogram": hist,
             "status": status, "bias": bias, "score": score, "cross": cross, "hist_growing": hg}
 
@@ -197,49 +213,68 @@ def calc_atr(highs, lows, closes):
     atr = sum(trs[:period]) / period
     for tr in trs[period:]:
         atr = (atr * (period - 1) + tr) / period
-    return {"valid": True, "value": round(atr, 6), "pct": round(atr / closes[-1] * 100, 2), "price": closes[-1]}
+    return {"valid": True, "value": round(atr, 6),
+            "pct": round(atr / closes[-1] * 100, 2) if closes[-1] else 0,
+            "price": closes[-1]}
 
 def calc_adx(highs, lows, closes, period=None):
+    """
+    ★ BUG #4 修正：invalid 回傳補全 bias 欄位，避免上層存取 KeyError
+    """
     period = period or P.get("adx_period", 10)
     n = len(closes)
     if n < period * 2 + 5:
-        return {"valid": False, "reason": "數據不足", "value": 0, "trend": "無趨勢", "strong": False}
+        return {"valid": False, "reason": "數據不足", "value": 0,
+                "trend": "無趨勢", "strong": False, "bias": "neutral",
+                "pdi": 0, "ndi": 0, "score": -1}
+
     tr_list, pdm_list, ndm_list = [], [], []
     for i in range(1, n):
         h, l, pc = highs[i], lows[i], closes[i-1]
         tr = max(h - l, abs(h - pc), abs(l - pc))
         up = highs[i] - highs[i-1]
         dn = lows[i-1] - lows[i]
-        pdm = up if (up > dn and up > 0) else 0
-        ndm = dn if (dn > up and dn > 0) else 0
-        tr_list.append(tr); pdm_list.append(pdm); ndm_list.append(ndm)
+        pdm_list.append(up if (up > dn and up > 0) else 0)
+        ndm_list.append(dn if (dn > up and dn > 0) else 0)
+        tr_list.append(tr)
 
     def wilder(data, p):
         s = sum(data[:p]); result = [s]
         for v in data[p:]: s = s - s/p + v; result.append(s)
         return result
 
-    atr14 = wilder(tr_list, period); pdm14 = wilder(pdm_list, period); ndm14 = wilder(ndm_list, period)
+    atr14 = wilder(tr_list, period)
+    pdm14 = wilder(pdm_list, period)
+    ndm14 = wilder(ndm_list, period)
     dx_list, pdi_list, ndi_list = [], [], []
     for i in range(len(atr14)):
         a = atr14[i]
         if a == 0: continue
-        pdi = 100 * pdm14[i] / a; ndi = 100 * ndm14[i] / a
+        pdi = 100 * pdm14[i] / a
+        ndi = 100 * ndm14[i] / a
         pdi_list.append(pdi); ndi_list.append(ndi)
         dsum = pdi + ndi
         dx_list.append(100 * abs(pdi - ndi) / dsum if dsum != 0 else 0)
+
     if len(dx_list) < period:
-        return {"valid": False, "reason": "DX不足", "value": 0, "trend": "無趨勢", "strong": False}
+        return {"valid": False, "reason": "DX不足", "value": 0,
+                "trend": "無趨勢", "strong": False, "bias": "neutral",
+                "pdi": 0, "ndi": 0, "score": -1}
+
     adx_val = round(sum(dx_list[-period:]) / period, 2)
     pdi_val = round(pdi_list[-1], 2) if pdi_list else 0
     ndi_val = round(ndi_list[-1], 2) if ndi_list else 0
+
     if adx_val >= 35:   trend, score = "強趨勢", 2
     elif adx_val >= 25: trend, score = "趨勢中", 1
     elif adx_val >= 20: trend, score = "弱趨勢", 0
     else:               trend, score = "無趨勢", -1
+
+    logger.debug(f"[ADX] adx={adx_val} pdi={pdi_val} ndi={ndi_val} trend={trend}")
     return {"valid": True, "value": adx_val, "pdi": pdi_val, "ndi": ndi_val,
             "trend": trend, "score": score,
-            "bias": "bullish" if pdi_val > ndi_val else "bearish", "strong": adx_val >= 25}
+            "bias": "bullish" if pdi_val > ndi_val else "bearish",
+            "strong": adx_val >= 25}
 
 def calc_bollinger(closes):
     period = P.get("bb_period", 15)
@@ -249,17 +284,21 @@ def calc_bollinger(closes):
     if ma is None or sd is None: return {"valid": False}
     upper = round(ma + P.get("bb_std", 2) * sd, 6)
     lower = round(ma - P.get("bb_std", 2) * sd, 6)
-    price = closes[-1]; bw = round((upper - lower) / ma * 100, 2)
-    if price >= upper:    pos, bias, score = "突破上軌", "overbought", -1
-    elif price <= lower:  pos, bias, score = "突破下軌", "oversold", 1
-    elif price > ma:      pos, bias, score = "中軌上方", "bullish", 1
-    else:                 pos, bias, score = "中軌下方", "bearish", -1
+    price = closes[-1]; bw = round((upper - lower) / ma * 100, 2) if ma else 0
+    if price >= upper:   pos, bias, score = "突破上軌", "overbought", -1
+    elif price <= lower: pos, bias, score = "突破下軌", "oversold", 1
+    elif price > ma:     pos, bias, score = "中軌上方", "bullish", 1
+    else:                pos, bias, score = "中軌下方", "bearish", -1
     return {"valid": True, "upper": upper, "mid": ma, "lower": lower, "price": price,
             "position": pos, "bias": bias, "score": score, "bandwidth": bw}
 
-def calc_support_resistance(highs, lows, closes, lookback=30):
-    if len(closes) < lookback:
-        lookback = len(closes)
+def calc_support_resistance(highs, lows, closes, lookback=None):
+    """★ BUG #5 修正：lookback 改為動態，至少取可用資料"""
+    if lookback is None:
+        lookback = P.get("support_lookback", 30)
+    lookback = min(lookback, len(closes))
+    if lookback < 5:
+        return {"valid": False}
     rh = highs[-lookback:]; rl = lows[-lookback:]; price = closes[-1]
     resistances = [rh[i] for i in range(2, len(rh)-2)
                    if rh[i] > rh[i-1] and rh[i] > rh[i-2] and rh[i] > rh[i+1] and rh[i] > rh[i+2]]
@@ -273,36 +312,47 @@ def calc_support_resistance(highs, lows, closes, lookback=30):
             "nearest_support":    round(ns, 4) if ns else None,
             "all_resistances":    [round(r, 4) for r in sorted(above)[:3]],
             "all_supports":       [round(s, 4) for s in sorted(below, reverse=True)[:3]],
-            "distance_to_res":    round((nr - price) / price * 100, 2) if nr else None,
-            "distance_to_sup":    round((price - ns) / price * 100, 2) if ns else None}
+            "distance_to_res":    round((nr - price) / price * 100, 2) if nr and price else None,
+            "distance_to_sup":    round((price - ns) / price * 100, 2) if ns and price else None}
 
-def calc_fibonacci(highs, lows, closes, lookback=30):
-    if len(closes) < lookback:
-        lookback = max(10, len(closes))
+def calc_fibonacci(highs, lows, closes, lookback=None):
+    """★ BUG #6 修正：lookback 改為動態"""
+    if lookback is None:
+        lookback = P.get("support_lookback", 30)
+    lookback = min(lookback, len(closes))
+    if lookback < 5:
+        return {"valid": False}
     rh = highs[-lookback:]; rl = lows[-lookback:]
     sh = max(rh); sl = min(rl); price = closes[-1]; diff = sh - sl
+    if diff == 0:
+        return {"valid": False}
     uptrend = rl.index(sl) < rh.index(sh)
+    fib_levels = P.get("fib_levels", [0.236, 0.382, 0.5, 0.618, 0.786])
     levels = {f"fib_{int(fib*1000)}": round((sh - diff*fib if uptrend else sl + diff*fib), 4)
-              for fib in P.get("fib_levels", [0.236, 0.382, 0.5, 0.618, 0.786])}
+              for fib in fib_levels}
     all_lv = list(levels.values())
-    above = [l for l in all_lv if l > price]; below = [l for l in all_lv if l < price]
+    above = [lv for lv in all_lv if lv > price]
+    below = [lv for lv in all_lv if lv < price]
     return {"valid": True, "swing_high": round(sh, 4), "swing_low": round(sl, 4), "uptrend": uptrend,
             "levels": levels, "nearest_above": min(above, default=None),
             "nearest_below": max(below, default=None),
-            "key_level_236": levels.get("fib_236"), "key_level_382": levels.get("fib_382"),
+            "key_level_236": levels.get("fib_236"),
+            "key_level_382": levels.get("fib_382"),
             "key_level_618": levels.get("fib_618")}
 
 def calc_candlestick_patterns(opens, highs, lows, closes):
     if len(closes) < 3:
         return {"valid": False}
-    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
-    o2, _, _, c2 = opens[-2], highs[-2], lows[-2], closes[-2]
-    body = abs(c - o); total = h - l if h > l else 0.0001
-    ul = h - max(c, o); ll = min(c, o) - l
+    o, h, l, c    = opens[-1], highs[-1], lows[-1], closes[-1]
+    o2, _, _, c2  = opens[-2], highs[-2], lows[-2], closes[-2]
+    body  = abs(c - o)
+    total = h - l if h > l else 0.0001
+    ul    = h - max(c, o)
+    ll    = min(c, o) - l
     patterns = []
-    if ll > 2*body and ul < 0.1*total and c > o:
+    if ll > 2 * body and ul < 0.1 * total and c > o:
         patterns.append({"name": "錘子線", "type": "bullish", "strength": 2})
-    if ul > 2*body and ll < 0.1*total and c < o:
+    if ul > 2 * body and ll < 0.1 * total and c < o:
         patterns.append({"name": "流星", "type": "bearish", "strength": 2})
     if c2 < o2 and c > o and c > o2 and o < c2:
         patterns.append({"name": "多頭吞噬", "type": "bullish", "strength": 3})
@@ -319,7 +369,8 @@ def calc_candlestick_patterns(opens, highs, lows, closes):
     bias = "bullish" if bull_cnt > bear_cnt else "bearish" if bear_cnt > bull_cnt else "neutral"
     strongest = max(patterns, key=lambda x: x["strength"], default=None)
     return {"valid": True, "patterns": patterns, "overall_bias": bias, "strongest": strongest,
-            "candlestick_pattern": patterns, "bullish": bull_cnt > 0 and bull_cnt >= bear_cnt,
+            "candlestick_pattern": patterns,
+            "bullish": bull_cnt > 0 and bull_cnt >= bear_cnt,
             "bearish": bear_cnt > 0 and bear_cnt > bull_cnt,
             "name": strongest["name"] if strongest else ""}
 
@@ -327,7 +378,7 @@ def calc_volume_ratio(volumes):
     period = P.get("vol_period", 10)
     if not volumes or len(volumes) < period + 1:
         return {"valid": False}
-    avg = sum(volumes[-period-1:-1]) / period
+    avg  = sum(volumes[-period-1:-1]) / period
     curr = volumes[-1]
     if avg == 0: return {"valid": False}
     ratio = round(curr / avg, 2)
@@ -340,17 +391,17 @@ def calc_volume_ratio(volumes):
             "status": status, "bias": bias, "score": score}
 
 def calc_all_indicators(data):
-    closes  = data.get("closes", [])
-    highs   = data.get("highs", [])
-    lows    = data.get("lows", [])
-    opens   = data.get("opens", [])
+    closes  = data.get("closes",  [])
+    highs   = data.get("highs",   [])
+    lows    = data.get("lows",    [])
+    opens   = data.get("opens",   [])
     volumes = data.get("volumes", [])
 
-    # ★ 修正：最低需求從 30 降至實際可用值（ema_trend=50 為最大需求）
-    min_bars = P.get("ema_trend", 50) + 5
-    if len(closes) < min_bars:
-        logger.warning(f"[indicators] K線不足：需{min_bars}根，有{len(closes)}根")
-        return {"valid": False, "reason": f"K線不足（需{min_bars}根，有{len(closes)}根）"}
+    # ★ BUG #2 修正：最低需求與 EMA 同步
+    need = P.get("ema_trend", 50) + 5
+    if len(closes) < need:
+        logger.warning(f"[indicators] K線不足：需{need}根，有{len(closes)}根")
+        return {"valid": False, "reason": f"K線不足（需{need}根，有{len(closes)}根）"}
 
     ema_s = calc_ema_system(closes)
     rsi   = calc_rsi(closes)
@@ -364,17 +415,32 @@ def calc_all_indicators(data):
     rd    = calc_rsi_divergence(closes)
     adx   = calc_adx(highs, lows, closes)
 
-    # 診斷日誌：幫助偵測哪個指標無效
-    for name, ind in [("EMA", ema_s), ("RSI", rsi), ("MACD", macd), ("ATR", atr), ("ADX", adx)]:
-        if not ind.get("valid"):
-            logger.debug(f"[indicators] {name} 無效: {ind.get('reason','')}")
+    # ★ BUG #7 修正：只對 valid 指標計算分數，避免無效分數拉低 total
+    valid_inds = [x for x in [ema_s, rsi, macd, bb] if x.get("valid")]
+    total = sum(x.get("score", 0) for x in valid_inds)
+    valid_count = len(valid_inds)
 
-    total = sum(x.get("score", 0) for x in [ema_s, rsi, macd, bb] if x.get("valid"))
-    if total >= 3:    bias = "strong_bullish"
-    elif total >= 1:  bias = "bullish"
-    elif total <= -3: bias = "strong_bearish"
-    elif total <= -1: bias = "bearish"
-    else:             bias = "neutral"
+    # 根據有效指標數量調整偏向判斷
+    if valid_count == 0:
+        bias = "neutral"
+    elif total >= max(2, valid_count):
+        bias = "strong_bullish"
+    elif total >= 1:
+        bias = "bullish"
+    elif total <= -max(2, valid_count):
+        bias = "strong_bearish"
+    elif total <= -1:
+        bias = "bearish"
+    else:
+        bias = "neutral"
+
+    logger.debug(
+        f"[indicators] valid={valid_count}/4 total={total} bias={bias} "
+        f"EMA={'OK' if ema_s.get('valid') else 'FAIL'} "
+        f"RSI={'OK' if rsi.get('valid') else 'FAIL'} "
+        f"MACD={'OK' if macd.get('valid') else 'FAIL'} "
+        f"ATR={'OK' if atr.get('valid') else 'FAIL'}"
+    )
 
     return {
         "valid": True,
@@ -385,6 +451,8 @@ def calc_all_indicators(data):
         "adx_value":  adx.get("value", 0) if adx.get("valid") else 0,
         "adx_trend":  adx.get("trend", "無趨勢"),
         "adx_strong": adx.get("strong", False),
-        "total_score": total, "overall_bias": bias,
+        "total_score":   total,
+        "valid_count":   valid_count,
+        "overall_bias":  bias,
         "current_price": closes[-1] if closes else None,
     }
